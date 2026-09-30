@@ -1,0 +1,261 @@
+"""Database tests against real SQLite files, in tmp_path."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from code_review.db import Database, Status
+
+
+@pytest.fixture
+def database(tmp_path: Path) -> Database:
+    db = Database(tmp_path / "reviews.db")
+    yield db
+    db.close()
+
+
+def test_enqueue_creates_queued_row(database: Database) -> None:
+    review_id, created = database.enqueue("a" * 40, "main")
+    assert created is True
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.QUEUED
+    assert review.branch == "main"
+    assert review.markdown is None
+
+
+def test_enqueue_is_idempotent_for_same_sha(database: Database) -> None:
+    first, created_first = database.enqueue("a" * 40)
+    second, created_second = database.enqueue("a" * 40)
+    assert created_first is True
+    assert created_second is False
+    assert first == second
+    assert database.counts()["total"] == 1
+
+
+def test_force_requeues_and_clears_previous_result(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.complete(review_id, markdown="old review", stop_reason="end_turn", agent="fake")
+
+    same_id, created = database.enqueue("a" * 40, force=True)
+    assert same_id == review_id
+    assert created is True
+
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.QUEUED
+    assert review.markdown is None
+    assert review.finished_at is None
+
+
+def test_claim_next_moves_to_running_in_order(database: Database) -> None:
+    first, _ = database.enqueue("a" * 40)
+    second, _ = database.enqueue("b" * 40)
+
+    claimed = database.claim_next()
+    assert claimed is not None
+    assert claimed.id == first
+    assert claimed.status is Status.RUNNING
+
+    claimed = database.claim_next()
+    assert claimed is not None
+    assert claimed.id == second
+
+
+def test_claim_next_returns_none_when_empty(database: Database) -> None:
+    assert database.claim_next() is None
+
+
+def test_claim_next_does_not_double_claim(database: Database) -> None:
+    database.enqueue("a" * 40)
+    assert database.claim_next() is not None
+    assert database.claim_next() is None
+
+
+def test_recover_interrupted_requeues_running_rows(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.claim_next()
+
+    recovered = database.recover_interrupted()
+    assert recovered == 1
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.QUEUED
+    assert review.started_at is None
+
+
+def test_recover_interrupted_is_a_noop_when_nothing_running(database: Database) -> None:
+    database.enqueue("a" * 40)
+    assert database.recover_interrupted() == 0
+
+
+def test_complete_stores_markdown_and_metadata(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.complete(
+        review_id,
+        markdown="# Review\n\nFound a bug.",
+        stop_reason="end_turn",
+        agent="claude-agent-acp",
+        agent_version="1.2.3",
+        usage={"used": 100, "size": 200},
+        tool_log=[{"tool_call_id": "c1", "decision": "allow"}],
+    )
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.COMPLETED
+    assert "Found a bug." in (review.markdown or "")
+    assert review.agent == "claude-agent-acp"
+    assert review.usage == {"used": 100, "size": 200}
+    assert review.tool_log[0]["decision"] == "allow"
+    assert review.finished_at is not None
+
+
+def test_truncated_review_is_stored_with_its_stop_reason(database: Database) -> None:
+    """A review cut short by max_tokens must not look identical to a complete one."""
+    review_id, _ = database.enqueue("a" * 40)
+    database.complete(
+        review_id,
+        markdown="Partial analysis of the first file",
+        stop_reason="max_tokens",
+        agent="fake",
+    )
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.COMPLETED
+    assert review.stop_reason == "max_tokens"
+
+
+def test_fail_records_error(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.fail(review_id, "agent command not found: 'nope'")
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.FAILED
+    assert "not found" in (review.error or "")
+    assert review.markdown is None
+
+
+def test_cancel_keeps_partial_markdown(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.cancel(review_id, "half a review")
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.status is Status.CANCELLED
+    assert review.markdown == "half a review"
+    assert review.stop_reason == "cancelled"
+
+
+def test_cancel_without_markdown_leaves_none(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.cancel(review_id)
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert review.markdown is None
+
+
+def test_fail_error_is_truncated_to_a_sane_length(database: Database) -> None:
+    review_id, _ = database.enqueue("a" * 40)
+    database.fail(review_id, "x" * 10_000)
+    review = database.get_by_id(review_id)
+    assert review is not None
+    assert len(review.error or "") <= 4000
+
+
+def test_get_by_short_sha(database: Database) -> None:
+    sha = "1234567890abcdef" * 2 + "12345678"
+    database.enqueue(sha)
+    review = database.get(sha[:8])
+    assert review is not None
+    assert review.sha == sha
+
+
+def test_get_returns_none_for_unknown_sha(database: Database) -> None:
+    assert database.get("0" * 40) is None
+
+
+def test_list_filters_by_status_and_limits(database: Database) -> None:
+    for index in range(5):
+        review_id, _ = database.enqueue(f"{index}" * 40)
+        if index < 2:
+            database.complete(review_id, markdown="ok", stop_reason="end_turn", agent="fake")
+
+    completed = database.list(status=Status.COMPLETED)
+    assert len(completed) == 2
+    assert database.list(limit=3) != []
+    assert len(database.list(limit=3)) == 3
+
+
+def test_list_is_newest_first(database: Database) -> None:
+    database.enqueue("a" * 40)
+    database.enqueue("b" * 40)
+    reviews = database.list()
+    assert reviews[0].sha == "b" * 40
+
+
+def test_latest_returns_most_recent(database: Database) -> None:
+    assert database.latest() is None
+    database.enqueue("a" * 40)
+    database.enqueue("b" * 40)
+    latest = database.latest()
+    assert latest is not None
+    assert latest.sha == "b" * 40
+
+
+def test_counts_reports_every_status(database: Database) -> None:
+    first, _ = database.enqueue("a" * 40)
+    database.enqueue("b" * 40)
+    database.complete(first, markdown="ok", stop_reason="end_turn", agent="fake")
+
+    counts = database.counts()
+    assert counts["completed"] == 1
+    assert counts["queued"] == 1
+    assert counts["total"] == 2
+    assert counts["failed"] == 0
+
+
+def test_database_creates_parent_directory(tmp_path: Path) -> None:
+    db = Database(tmp_path / "nested" / "deep" / "reviews.db")
+    try:
+        assert db.path.exists()
+    finally:
+        db.close()
+
+
+def test_reopening_preserves_data(tmp_path: Path) -> None:
+    path = tmp_path / "reviews.db"
+    with Database(path) as first:
+        review_id, _ = first.enqueue("a" * 40)
+        first.complete(review_id, markdown="kept", stop_reason="end_turn", agent="fake")
+
+    with Database(path) as second:
+        review = second.get("a" * 40)
+        assert review is not None
+        assert review.markdown == "kept"
+
+
+def test_schema_version_is_recorded(database: Database) -> None:
+    row = database._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    assert row is not None
+    assert row["value"] == "1"
+
+
+def test_reopening_an_old_database_is_tolerated(tmp_path: Path) -> None:
+    """A DB missing the newer columns should still open rather than crash the daemon."""
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE reviews (id INTEGER PRIMARY KEY, sha TEXT, status TEXT)")
+        conn.execute("INSERT INTO reviews(sha, status) VALUES('a', 'queued')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = Database(path)
+    try:
+        counts = db.counts()
+        assert counts["queued"] == 1
+    finally:
+        db.close()

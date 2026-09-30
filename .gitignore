@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local review state (belt and braces; code-review init also gitignores it)
+.codereview/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

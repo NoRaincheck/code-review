@@ -1,0 +1,70 @@
+[project]
+name = "code-review"
+version = "0.1.0"
+description = "Background AI code review of every commit, orchestrated over the Agent Client Protocol"
+readme = "README.md"
+authors = [
+    { name = "NoRaincheck", email = "2498638+NoRaincheck@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    # Pinned exactly: 1.0.0rc2 already removed acp.helpers and expanded SessionUpdate
+    # from 13 to 16 variants, so an unpinned install would break silently.
+    "agent-client-protocol==0.12.1",
+]
+
+[project.scripts]
+code-review = "code_review:main"
+
+[project.urls]
+Homepage = "https://github.com/kenn-io/roborev"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pytest-asyncio>=1.1",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S", "BLE", "PTH", "ARG", "C4"]
+ignore = [
+    "S101",    # asserts are the point in tests
+    "S603",    # subprocess with a fixed argv is intentional
+    "S607",    # "git" is resolved via PATH on purpose
+    "RUF001",  # ambiguity in the git log output we embed
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG", "S", "BLE", "PTH", "SIM", "E501"]
+"src/code_review/cli.py" = ["ARG"]
+# The ACP Client protocol fixes these method signatures, including parameter names that a
+# given implementation has no use for. Renaming or dropping them would break the contract.
+"src/code_review/agent/policy_client.py" = ["ARG002"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+packages = ["code_review"]
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["acp.*"]
+ignore_missing_imports = true
