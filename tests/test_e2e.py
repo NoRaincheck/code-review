@@ -240,6 +240,34 @@ def test_doctor_warns_when_no_agent(repo: Path) -> None:
     assert "NOT CONFIGURED" in result.stdout
 
 
+def test_doctor_probe_confirms_a_real_acp_agent(
+    scripted_repo: tuple[Path, str], repo: Path
+) -> None:
+    """--probe must actually complete a handshake, not just check the binary exists."""
+    result = run_cli("doctor", "--probe", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "acp probe:   OK" in result.stdout
+    assert "reports as fake-agent 9.9.9" in result.stdout
+
+
+def test_doctor_probe_fails_loudly_for_a_non_acp_command(repo: Path, second_commit: str) -> None:
+    """A command on PATH that is not an ACP agent must be reported, not accepted."""
+    (repo / ".codereview.toml").write_text(
+        'review_agent = ["/bin/echo", "not-an-agent"]\n', encoding="utf-8"
+    )
+    result = run_cli("doctor", "--probe", "--repo", str(repo))
+    assert "acp probe:   FAILED" in result.stdout
+
+
+def test_doctor_without_probe_does_not_spawn_the_agent(
+    scripted_repo: tuple[Path, str], repo: Path
+) -> None:
+    result = run_cli("doctor", "--repo", str(repo))
+    assert result.returncode == 0
+    assert "acp probe" not in result.stdout
+    assert "--probe" in result.stdout
+
+
 def test_hook_status_and_uninstall(scripted_repo: tuple[Path, str]) -> None:
     repo, _ = scripted_repo
     hook.install(repo)

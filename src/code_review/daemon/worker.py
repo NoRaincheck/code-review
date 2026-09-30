@@ -218,35 +218,3 @@ class Worker:
                 outcome.stop_reason,
             )
         log.info("review of %s complete", review.short_sha)
-
-    # -- direct review ----------------------------------------------------
-
-    async def review_now(
-        self, repo: Path, sha: str, *, force: bool = False, wait: bool = False
-    ) -> tuple[int, bool]:
-        """Queue a review for immediate pickup, optionally waiting for the result."""
-        database = self.database_for(repo)
-        review_id, created = database.enqueue(sha, git.current_branch(repo), force=force)
-        self.notify()
-        if wait:
-            await self._wait_for_terminal(review_id)
-        return review_id, created
-
-    async def _wait_for_terminal(self, review_id: int, timeout: float = 3600.0) -> None:
-        deadline = asyncio.get_running_loop().time() + timeout
-        while asyncio.get_running_loop().time() < deadline:
-            database = self._find_database_for_id(review_id)
-            if database is None:
-                return
-            review = database.get_by_id(review_id)
-            if review is None:
-                return
-            if review.status in {Status.COMPLETED, Status.FAILED, Status.CANCELLED}:
-                return
-            await asyncio.sleep(0.1)
-
-    def _find_database_for_id(self, review_id: int) -> Database | None:
-        for database in self._databases.values():
-            if database.get_by_id(review_id) is not None:
-                return database
-        return None

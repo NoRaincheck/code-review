@@ -195,15 +195,6 @@ def test_list_is_newest_first(database: Database) -> None:
     assert reviews[0].sha == "b" * 40
 
 
-def test_latest_returns_most_recent(database: Database) -> None:
-    assert database.latest() is None
-    database.enqueue("a" * 40)
-    database.enqueue("b" * 40)
-    latest = database.latest()
-    assert latest is not None
-    assert latest.sha == "b" * 40
-
-
 def test_counts_reports_every_status(database: Database) -> None:
     first, _ = database.enqueue("a" * 40)
     database.enqueue("b" * 40)

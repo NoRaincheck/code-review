@@ -36,8 +36,24 @@ review_timeout_seconds = 300
 ```
 
 There is no built-in list on purpose: ACP launch commands differ per vendor and change over
-time, so an explicit argv never needs maintenance. `code-review doctor` checks that your
-command exists and that the SDK is installed.
+time, so an explicit argv never needs maintenance.
+
+Check that your command actually speaks ACP — this completes a real handshake without
+spending a token:
+
+```bash
+code-review doctor --probe
+```
+
+```
+agent:       opencode acp
+              found at /opt/homebrew/bin/opencode
+acp probe:   OK - handshake ok (opencode acp)
+              reports as OpenCode 1.18.33
+```
+
+A command that is on `PATH` but is not an ACP agent is reported as such, rather than
+failing later during a review.
 
 ## Use
 
@@ -126,7 +142,7 @@ Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the
 ## Development
 
 ```bash
-uv run pytest               # 250 tests, no network, no vendor CLI
+uv run pytest               # 258 tests, no network, no vendor CLI
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy                 # strict

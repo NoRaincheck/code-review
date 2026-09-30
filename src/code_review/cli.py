@@ -449,9 +449,11 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Check that everything needed is in place, without contacting any model."""
+    """Check that everything needed is in place. ``--probe`` also proves the agent works."""
     repo = None
-    if git.is_repo(Path.cwd()):
+    if args.repo:
+        repo = _repo_or_fail(args.repo)
+    elif git.is_repo(Path.cwd()):
         repo = _repo_or_fail(None)
 
     print(f"code-review {__version__} (python {sys.version.split()[0]})")
@@ -474,27 +476,42 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"repository:  {repo}")
     try:
         config = config_module.load_config(repo)
-        if config.agent is None:
-            print("agent:       NOT CONFIGURED")
-            print(f"              set review_agent in {paths.config_path(repo)}")
-        else:
-            print(f"agent:       {config.agent.command}")
-            if shutil_which(config.agent.command) is None:
-                print(f"              WARNING: {config.agent.command!r} not found on PATH")
-            else:
-                print(f"              found at {shutil_which(config.agent.command)}")
-            print(
-                f"              verify it speaks ACP, e.g. `code-review review --agent "
-                f"{config.agent.command} HEAD`"
-            )
     except ConfigError as exc:
         print(f"config:      INVALID: {exc}")
         return EXIT_ERROR
+
+    if config.agent is None:
+        print("agent:       NOT CONFIGURED")
+        print(f"              set review_agent in {paths.config_path(repo)}")
+    else:
+        _report_agent(repo, config, probe=args.probe)
 
     print(f"hook:        {'installed' if hook_module.is_installed(repo) else 'not installed'}")
     print(f"database:    {paths.db_path(repo)}")
     print(f"daemon:      {'running' if supervisor.is_running() else 'stopped'}")
     return EXIT_OK
+
+
+def _report_agent(repo: Path, config: config_module.Config, *, probe: bool) -> None:
+    """Print what is known about the configured agent, and optionally prove it speaks ACP."""
+    agent = config.require_agent()
+    print(f"agent:       {' '.join(agent.argv)}")
+
+    resolved = shutil_which(agent.command)
+    if resolved is None:
+        print(f"              WARNING: {agent.command!r} not found on PATH")
+    else:
+        print(f"              found at {resolved}")
+
+    if not probe:
+        print("              run `code-review doctor --probe` to check it speaks ACP")
+        return
+
+    from .agent.probe import describe, probe_agent
+
+    result = asyncio.run(probe_agent(agent, repo))
+    for line in describe(result):
+        print(f"              {line.strip()}" if not line.startswith("acp probe") else line)
 
 
 def shutil_which(command: str) -> str | None:
@@ -574,6 +591,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.set_defaults(func=cmd_hook)
 
     p_doctor = sub.add_parser("doctor", help="check the installation")
+    add_repo(p_doctor)
+    p_doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help="spawn the agent and complete an ACP handshake to prove it works",
+    )
     p_doctor.set_defaults(func=cmd_doctor)
 
     return parser

@@ -44,7 +44,6 @@ class ReviewOutcome:
     agent_version: str | None = None
     usage: dict[str, Any] | None = None
     tool_log: list[dict[str, Any]] = field(default_factory=list)
-    thoughts: list[str] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -160,7 +159,6 @@ class ReviewRunner:
             agent=agent.label,
             usage=usage,
             tool_log=client.tool_log(),
-            thoughts=client.thoughts,
         )
         return self._outcome
 

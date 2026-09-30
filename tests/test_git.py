@@ -39,11 +39,6 @@ def test_resolve_sha_raises_for_unknown_rev(repo: Path) -> None:
         git.resolve_sha(repo, "does-not-exist")
 
 
-def test_commit_exists(repo: Path) -> None:
-    assert git.commit_exists(repo)
-    assert not git.commit_exists(repo, "nope")
-
-
 def test_current_branch(repo: Path) -> None:
     assert git.current_branch(repo) == "main"
 
@@ -124,14 +119,6 @@ def test_truncate_diff_does_not_split_a_multibyte_character() -> None:
     truncated = git.truncate_diff("é" * 100, 51)
     truncated.encode("utf-8").decode("utf-8")  # must not raise
     assert "é" in truncated
-
-
-def test_diff_stat_returns_text(repo: Path, second_commit: str) -> None:
-    assert "app.py" in git.diff_stat(repo, second_commit)
-
-
-def test_diff_stat_is_empty_for_unknown_rev(repo: Path) -> None:
-    assert git.diff_stat(repo, "nope") == ""
 
 
 def test_is_ancestor(repo: Path, second_commit: str) -> None:

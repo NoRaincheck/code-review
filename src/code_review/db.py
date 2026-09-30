@@ -63,10 +63,6 @@ class Status(StrEnum):
 TERMINAL_STATUSES = frozenset({Status.COMPLETED, Status.FAILED, Status.CANCELLED})
 
 
-class DatabaseError(Exception):
-    """A persistence operation failed."""
-
-
 @dataclass(frozen=True, slots=True)
 class Review:
     """One row of ``reviews``."""
@@ -296,10 +292,6 @@ class Database:
 
     def get_by_id(self, review_id: int) -> Review | None:
         row = self._conn.execute("SELECT * FROM reviews WHERE id=?", (review_id,)).fetchone()
-        return _row_to_review(row) if row is not None else None
-
-    def latest(self) -> Review | None:
-        row = self._conn.execute("SELECT * FROM reviews ORDER BY id DESC LIMIT 1").fetchone()
         return _row_to_review(row) if row is not None else None
 
     def list(self, status: Status | None = None, limit: int = 20, offset: int = 0) -> list[Review]:

@@ -38,10 +38,6 @@ from ..policy import Decision, Verdict
 
 log = logging.getLogger(__name__)
 
-# Tools this client serves. Anything else raises, because the alternative is an agent
-# reaching a capability we never intended to expose.
-ALLOWED_FS_COMMANDS = frozenset({"git"})
-
 
 @dataclass(slots=True)
 class ToolEvent:
@@ -87,7 +83,6 @@ class ReviewClient(Client):
 
     config: ReviewClientConfig
     markdown_parts: list[str] = field(default_factory=list)
-    thoughts: list[str] = field(default_factory=list)
     tool_events: dict[str, ToolEvent] = field(default_factory=dict)
     usage: dict[str, Any] | None = None
     current_message_id: str | None = None
@@ -126,10 +121,6 @@ class ReviewClient(Client):
                         self.markdown_parts.append("\n\n")
                     self.current_message_id = message_id
                     self.markdown_parts.append(text)
-            elif variant == "agent_thought_chunk":
-                text = self._text_of(getattr(update, "content", None))
-                if text:
-                    self.thoughts.append(text)
             elif variant in ("tool_call", "tool_call_update"):
                 self._record(
                     tool_call_id=getattr(update, "tool_call_id", None),

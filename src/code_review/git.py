@@ -113,14 +113,6 @@ def resolve_sha(repo: Path, rev: str = "HEAD") -> str:
     return _run(repo, ["rev-parse", "--verify", f"{rev}^{{commit}}"]).strip()
 
 
-def commit_exists(repo: Path, rev: str = "HEAD") -> bool:
-    try:
-        resolve_sha(repo, rev)
-    except GitError, subprocess.SubprocessError:
-        return False
-    return True
-
-
 def load_commit(repo: Path, rev: str = "HEAD", max_diff_bytes: int | None = None) -> Commit:
     """Load a commit's metadata and its diff against its first parent.
 
@@ -162,13 +154,6 @@ def truncate_diff(diff: str, max_bytes: int | None) -> str:
         f"Use read-only git commands such as `git show <sha>` or `git show <sha>:<path>` "
         f"to inspect the rest.]\n"
     )
-
-
-def diff_stat(repo: Path, rev: str = "HEAD") -> str:
-    try:
-        return _run(repo, ["show", "--no-color", "--stat", rev])
-    except GitError, subprocess.SubprocessError:
-        return ""
 
 
 def is_ancestor(repo: Path, maybe_ancestor: str, descendant: str) -> bool:

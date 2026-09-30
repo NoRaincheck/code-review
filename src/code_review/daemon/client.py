@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import socket
 from pathlib import Path
 from typing import Any
@@ -76,8 +77,6 @@ def ping(timeout: float = 2.0) -> bool:
                 if not chunk:
                     return False
                 buffer += chunk
-        import json
-
         return bool(json.loads(buffer.decode("utf-8")).get("ok"))
     except OSError, ValueError:
         return False

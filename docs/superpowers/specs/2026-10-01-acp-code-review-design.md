@@ -285,7 +285,7 @@ code-review list [--status S] [--limit N] [--json]
 code-review status                # daemon liveness + queue depth
 code-review daemon start|stop|status|run
 code-review hook install|uninstall|status
-code-review doctor                # check installation and agent availability
+code-review doctor [--probe]     # check installation; --probe proves the agent speaks ACP
 ```
 
 `show` and `list` exit non-zero with a message when no review exists for the sha, so shell
@@ -297,6 +297,24 @@ markdown with no header decoration for pipes and editors.
 process instead, which is useful when the daemon is not wanted. Both paths persist the
 result, so `show`, `list`, and the stored tool-call audit trail behave identically either
 way.
+
+`doctor --probe` exists because "is this command an ACP agent?" is the single most likely
+setup failure, and a missing binary is not evidence either way. The probe spawns the
+command and completes `initialize` plus `session/new` — pure handshake, so it costs no
+tokens and no model call — then reports the agent's self-declared name and version. It
+never raises; a failure is the deliverable. Verified against commands that are present on
+PATH but are not ACP agents:
+
+| `review_agent` | Probe result |
+| --- | --- |
+| `["opencode", "acp"]` | `OK` — reports as `OpenCode 1.18.33` |
+| `["/bin/cat"]` | `FAILED - RequestError: Method not found` |
+| `["/bin/echo", "x"]` | `FAILED - ConnectionError: Connection closed` |
+| `["git", "--version"]` | `FAILED - ConnectionError: Connection closed` |
+| `["/nonexistent/binary"]` | `FAILED - not found on PATH` |
+
+An agent that advertises auth methods is reported as *offering* them, not as requiring
+them: `opencode` lists `opencode-login` and still starts fine when already authenticated.
 
 ## 12. Testing
 
@@ -316,7 +334,7 @@ way.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-250 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+258 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
@@ -417,7 +435,12 @@ Recorded because each is a trap that looks correct in review.
    temp dirs; the real `~/.codereview/daemon.sock` is comfortably short.
 8. **`--inline` did not persist its result,** so the tool-call audit trail was lost on that
    path. Both code paths now write the same row.
-9. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
+9. **Dead code accumulated.** `Worker.review_now` and its wait helpers, `git.diff_stat`,
+   `git.commit_exists`, `Database.latest`, `DatabaseError`, `ALLOWED_FS_COMMANDS`, and the
+   `thoughts` collection that was carried through `ReviewOutcome` but never stored or shown
+   were all unreferenced. Removed rather than left as surface area. `thoughts` was the
+   closest call: it is plausible future debugging value, but nothing could read it.
+10. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
    pid file, so a daemon whose `CODEREVIEW_HOME` was deleted could not be stopped by name and
    lingered forever. A test run leaked roughly a hundred of them. Fixed two ways: an orphan
    watchdog in the daemon that exits when its pid file or socket disappears, and a `reap()`
