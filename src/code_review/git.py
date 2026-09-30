@@ -99,6 +99,28 @@ def toplevel(repo: Path) -> Path:
     return Path(_run(repo, ["rev-parse", "--show-toplevel"]).strip())
 
 
+def common_dir(repo: Path) -> Path:
+    """The repository's shared git directory.
+
+    Differs from ``.git`` in a linked worktree, where ``.git`` is a *file* pointing at
+    ``<common>/worktrees/<name>`` rather than a directory. Returns an absolute path either
+    way, since git reports the main worktree's answer relative to the repository root.
+    """
+    value = _run(repo, ["rev-parse", "--git-common-dir"]).strip()
+    candidate = Path(value)
+    return candidate if candidate.is_absolute() else (repo / candidate).resolve()
+
+
+def hooks_dir(repo: Path) -> Path:
+    """Where git looks for hooks, resolved by git itself.
+
+    Hooks live in the shared common directory, so a hook installed from a linked worktree
+    applies to every worktree of the repository. Deriving this as ``.git/hooks`` would
+    break in a worktree, where ``.git`` is a file.
+    """
+    return common_dir(repo) / "hooks"
+
+
 def current_branch(repo: Path) -> str | None:
     """Branch name, or None on a detached HEAD."""
     try:

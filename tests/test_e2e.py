@@ -247,7 +247,7 @@ def test_doctor_probe_confirms_a_real_acp_agent(
     result = run_cli("doctor", "--probe", "--repo", str(repo))
     assert result.returncode == 0, result.stderr
     assert "acp probe:   OK" in result.stdout
-    assert "reports as fake-agent 9.9.9" in result.stdout
+    assert "ready for reviews (fake-agent 9.9.9)" in result.stdout
 
 
 def test_doctor_probe_fails_loudly_for_a_non_acp_command(repo: Path, second_commit: str) -> None:

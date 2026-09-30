@@ -8,10 +8,12 @@ write? A reviewer given shell access to a real checkout makes that worth pinning
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from code_review import git
 from code_review.policy import READ_ONLY_GIT_SUBCOMMANDS
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "code_review"
@@ -80,33 +82,62 @@ def test_policy_allowlist_excludes_every_write_subcommand() -> None:
 
 
 def test_nothing_in_the_package_writes_into_the_git_directory() -> None:
-    """Only paths.py may name a .git path segment, and it may only hand back a hook path.
+    """No module may hard-code a .git path.
 
     The one legitimate write into .git is the post-commit hook, which git expects us to
-    create. Every other module must reach the repository only through git.py. Matches the
-    path *segment* ".git", so ".gitignore" does not count.
+    create. Its location must come from git rather than string arithmetic, because in a
+    linked worktree ``.git`` is a file. Matched on the path *segment* ".git", so
+    ".gitignore" does not count.
     """
     segment = re.compile(r"""(?<![\w.])["']\.git(?:/|["'])""")
+    offenders = []
     for source in SRC.rglob("*.py"):
-        if source.name == "paths.py":
-            continue
         text = source.read_text(encoding="utf-8")
-        offenders = [
-            line.strip()
-            for line in text.splitlines()
-            if not line.strip().startswith("#") and segment.search(line)
-        ]
-        assert not offenders, f"{source.name} names a .git path directly: {offenders}"
+        for line in text.splitlines():
+            if line.strip().startswith("#"):
+                continue
+            if segment.search(line) or '".git"' in line:
+                offenders.append(f"{source.name}: {line.strip()}")
+    assert not offenders, f"modules hard-code a .git path: {offenders}"
 
 
-def test_git_directory_writes_go_through_paths() -> None:
-    """paths.py is the single place that constructs a .git path."""
-    text = (SRC / "paths.py").read_text(encoding="utf-8")
-    assert '".git"' in text
-    assert "hooks_dir" in text
-    # It must not be constructing a loose-object or ref path.
-    assert "objects" not in text
-    assert "refs" not in text
+def test_git_directories_come_from_git_not_string_arithmetic() -> None:
+    """git.py must ask git where its directories are."""
+    text = (SRC / "git.py").read_text(encoding="utf-8")
+    assert "--git-common-dir" in text, "hooks_dir must be derived from the common dir"
+    assert "hooks" in text
+
+
+def test_hooks_dir_resolves_the_shared_location_in_a_worktree(repo: Path, tmp_path: Path) -> None:
+    """A worktree's .git is a file, so .git/hooks cannot be constructed by hand."""
+    worktree = tmp_path / "linked"
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout
+
+    run("worktree", "add", "-q", str(worktree), "-b", "feature")
+
+    assert (worktree / ".git").is_file(), "precondition: .git is a file in a worktree"
+    assert not (worktree / ".git" / "hooks").exists()
+
+    hooks = git.hooks_dir(worktree)
+    assert hooks.is_dir(), hooks
+    # Hooks are shared, so a worktree resolves to the main repository's hooks.
+    assert hooks == git.hooks_dir(repo)
+
+
+def test_toplevel_reports_each_worktree(repo: Path, tmp_path: Path, second_commit: str) -> None:
+    worktree = tmp_path / "linked2"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "-b", "feature2"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+    assert git.toplevel(worktree).resolve() == worktree.resolve()
+    assert git.toplevel(repo).resolve() == repo.resolve()
 
 
 @pytest.mark.parametrize("subcommand", sorted(READ_ONLY_GIT_SUBCOMMANDS))

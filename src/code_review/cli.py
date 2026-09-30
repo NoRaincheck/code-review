@@ -106,7 +106,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         hook_path = hook_module.install(repo, force=args.force)
         hook_state = "installed"
     except hook_module.HookError as exc:
-        hook_path = paths.post_commit_hook_path(repo)
+        hook_path = hook_module.hook_path(repo)
         hook_state = f"not installed: {exc}"
 
     config = config_module.load_config(repo)
@@ -511,7 +511,7 @@ def _report_agent(repo: Path, config: config_module.Config, *, probe: bool) -> N
 
     result = asyncio.run(probe_agent(agent, repo))
     for line in describe(result):
-        print(f"              {line.strip()}" if not line.startswith("acp probe") else line)
+        print(line if line.startswith("acp probe") else f"              {line.strip()}")
 
 
 def shutil_which(command: str) -> str | None:

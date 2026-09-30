@@ -48,12 +48,18 @@ code-review doctor --probe
 ```
 agent:       opencode acp
               found at /opt/homebrew/bin/opencode
-acp probe:   OK - handshake ok (opencode acp)
-              reports as OpenCode 1.18.33
+acp probe:   OK - ready for reviews (OpenCode 1.18.33)
 ```
 
-A command that is on `PATH` but is not an ACP agent is reported as such, rather than
-failing later during a review.
+Three outcomes, because they need different fixes:
+
+- `OK` — works.
+- `PARTIAL` — speaks ACP but cannot start a session, usually because you are not logged in.
+  The agent's own auth methods are listed.
+- `FAILED` — is not an ACP agent.
+
+A command on `PATH` that is not an ACP agent is reported here rather than failing later
+during a review.
 
 ## Use
 
@@ -117,6 +123,16 @@ All keys optional in `.codereview.toml`:
 
 `CODEREVIEW_HOME` relocates the daemon socket, pid file, and logs from `~/.codereview`.
 
+## Git worktrees
+
+The hook path is resolved by git, so `code-review init` works from any worktree and installs
+into the repository's shared hooks directory — one hook covers every worktree, which is what
+git expects.
+
+The review database is per-worktree, since `.codereview/` lives inside each one. `show` in
+one worktree will not see reviews produced in another, and the same commit can be reviewed
+once per worktree.
+
 ## Safety
 
 The reviewing agent gets full read access and no ability to write: edits, deletes, moves,
@@ -142,7 +158,7 @@ Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the
 ## Development
 
 ```bash
-uv run pytest               # 258 tests, no network, no vendor CLI
+uv run pytest               # 262 tests, no network, no vendor CLI
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy                 # strict

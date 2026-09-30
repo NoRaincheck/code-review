@@ -13,7 +13,7 @@ from code_review import git, hook, paths
 
 
 def read_hook(repo: Path) -> str:
-    return paths.post_commit_hook_path(repo).read_text(encoding="utf-8")
+    return hook.hook_path(repo).read_text(encoding="utf-8")
 
 
 # -- installation ----------------------------------------------------------
@@ -70,7 +70,7 @@ def test_hook_interpreter_can_import_code_review(repo: Path) -> None:
 def test_hook_script_is_valid_shell(repo: Path) -> None:
     hook.install(repo)
     result = subprocess.run(
-        ["sh", "-n", str(paths.post_commit_hook_path(repo))],
+        ["sh", "-n", str(hook.hook_path(repo))],
         capture_output=True,
         text=True,
         check=False,
@@ -93,7 +93,7 @@ def test_reinstall_refreshes_stale_paths(repo: Path, isolated_home: Path) -> Non
     commit logging an error forever.
     """
     hook.install(repo)
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.write_text(
         path.read_text(encoding="utf-8").replace(str(paths.hook_log_path()), "/old/path.log"),
         encoding="utf-8",
@@ -107,7 +107,7 @@ def test_reinstall_refreshes_stale_paths(repo: Path, isolated_home: Path) -> Non
 
 
 def test_reinstall_preserves_foreign_content_around_the_block(repo: Path) -> None:
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\necho before\n", encoding="utf-8")
     hook.install(repo, force=True)
@@ -119,7 +119,7 @@ def test_reinstall_preserves_foreign_content_around_the_block(repo: Path) -> Non
 
 
 def test_install_refuses_to_clobber_a_foreign_hook(repo: Path) -> None:
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
 
@@ -129,7 +129,7 @@ def test_install_refuses_to_clobber_a_foreign_hook(repo: Path) -> None:
 
 
 def test_force_wraps_an_existing_hook(repo: Path) -> None:
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
 
@@ -150,11 +150,11 @@ def test_force_creates_the_hooks_directory_when_absent(repo: Path) -> None:
 def test_uninstall_removes_the_file_when_ours_alone(repo: Path) -> None:
     hook.install(repo)
     assert hook.uninstall(repo) is True
-    assert not paths.post_commit_hook_path(repo).exists()
+    assert not hook.hook_path(repo).exists()
 
 
 def test_uninstall_preserves_foreign_content(repo: Path) -> None:
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
     hook.install(repo, force=True)
@@ -170,7 +170,7 @@ def test_uninstall_reports_nothing_to_do(repo: Path) -> None:
 
 
 def test_uninstall_does_not_remove_a_foreign_hook(repo: Path) -> None:
-    path = paths.post_commit_hook_path(repo)
+    path = hook.hook_path(repo)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
     assert hook.uninstall(repo) is False

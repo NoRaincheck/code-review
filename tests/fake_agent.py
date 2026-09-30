@@ -55,6 +55,21 @@ class FakeAgent:
 
     def new_session(self, request_id: Any, params: dict[str, Any]) -> None:
         self.cwd = params.get("cwd")
+        failure = self.script.get("fail_session")
+        if failure:
+            self.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32000,
+                        "message": failure
+                        if isinstance(failure, str)
+                        else "Authentication required",
+                    },
+                }
+            )
+            return
         self.respond(request_id, {"sessionId": "sess_fake_1"})
 
     # -- the review turn --------------------------------------------------

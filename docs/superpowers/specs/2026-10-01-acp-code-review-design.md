@@ -146,6 +146,21 @@ daemon: INSERT review(sha, status='queued')  ──▶ ack
 **The commit is never blocked.** Every failure path in `enqueue` exits 0 and appends to
 `~/.codereview/hook.log`.
 
+### Worktrees
+
+The hook path is resolved by git (`git rev-parse --git-common-dir`), never by string
+arithmetic on `.git/hooks`. In a linked worktree `.git` is a *file* pointing at
+`<common>/worktrees/<name>`, so a hand-built path cannot exist; deriving it from git is the
+only thing that works. Two consequences, both verified live:
+
+- **The hook is shared.** Installing from any worktree installs into the repository's common
+  hooks directory, so every worktree of the repository gets reviews from the one hook.
+- **The review database is per-worktree.** `.codereview/` sits inside each worktree, so
+  `show` in one worktree does not see reviews produced in another. Reviews are keyed by
+  commit, which is shared across worktrees, so the same commit can be reviewed once per
+  worktree. Accepted for v1: a shared store would need to key on the common directory and
+  handle two worktrees reviewing the same commit concurrently.
+
 ## 5. Module boundaries
 
 Each unit is independently understandable and testable.
@@ -301,20 +316,40 @@ way.
 `doctor --probe` exists because "is this command an ACP agent?" is the single most likely
 setup failure, and a missing binary is not evidence either way. The probe spawns the
 command and completes `initialize` plus `session/new` — pure handshake, so it costs no
-tokens and no model call — then reports the agent's self-declared name and version. It
-never raises; a failure is the deliverable. Verified against commands that are present on
-PATH but are not ACP agents:
+tokens and no model call. It never raises; a failure is the deliverable.
 
-| `review_agent` | Probe result |
+It reports **three** states, not two, because the first two need different fixes:
+
+| `review_agent` | Result |
 | --- | --- |
-| `["opencode", "acp"]` | `OK` — reports as `OpenCode 1.18.33` |
-| `["/bin/cat"]` | `FAILED - RequestError: Method not found` |
-| `["/bin/echo", "x"]` | `FAILED - ConnectionError: Connection closed` |
-| `["git", "--version"]` | `FAILED - ConnectionError: Connection closed` |
-| `["/nonexistent/binary"]` | `FAILED - not found on PATH` |
+| `["opencode", "acp"]` | `OK` — ready for reviews (OpenCode 1.18.33) |
+| `["@agentclientprotocol/codex-acp"]` | `PARTIAL` — speaks ACP, `session/new` says "Authentication required" |
+| `["/bin/cat"]` | `FAILED` — `RequestError: Method not found` |
+| `["/bin/echo", "x"]` | `FAILED` — `ConnectionError: Connection closed` |
+| `["git", "--version"]` | `FAILED` — `ConnectionError: Connection closed` |
+| `["/nonexistent/binary"]` | `FAILED` — not found on PATH |
 
-An agent that advertises auth methods is reported as *offering* them, not as requiring
-them: `opencode` lists `opencode-login` and still starts fine when already authenticated.
+`PARTIAL` exists because `codex-acp` answers `initialize` correctly and then refuses
+`session/new` when nobody has logged in. Collapsing that into a failure would tell someone
+their `review_agent` was wrong when it is right.
+
+An agent that advertises auth methods is reported as *offering* them, not requiring them:
+`opencode` lists `opencode-login` and starts fine when already authenticated.
+
+### Cross-vendor verification
+
+The probe was used to check the central claim — that this client works with more than one
+ACP implementation — against two vendors' code:
+
+- `opencode acp` (1.18.33): `initialize` and `session/new` both succeed.
+- `@agentclientprotocol/codex-acp` (2.0.1): `initialize` succeeds, reporting
+  `protocolVersion: 1` and auth methods `api-key` and `chat-gpt`. `session/new` then
+  refuses with `Authentication required`, which is this machine not being logged in to
+  Codex, not a protocol problem.
+
+Two independent implementations answering the same client is the evidence that the
+integration is genuinely protocol-driven rather than tuned to one agent. Neither requires a
+model call to check.
 
 ## 12. Testing
 
@@ -334,7 +369,7 @@ them: `opencode` lists `opencode-login` and still starts fine when already authe
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-258 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+262 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
@@ -440,7 +475,13 @@ Recorded because each is a trap that looks correct in review.
    `thoughts` collection that was carried through `ReviewOutcome` but never stored or shown
    were all unreferenced. Removed rather than left as surface area. `thoughts` was the
    closest call: it is plausible future debugging value, but nothing could read it.
-10. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
+10. **`code-review init` crashed in a git worktree.** The hook path was built as
+   `<repo>/.git/hooks`, which cannot exist in a linked worktree because `.git` is a file.
+   `NotADirectoryError` with a traceback. Fixed by asking git for the location via
+   `git rev-parse --git-common-dir`. Worth noting that roborev, whose design this follows,
+   calls out worktree support explicitly — so it was a gap I should have anticipated rather
+   than discovered by running `init` in one.
+11. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
    pid file, so a daemon whose `CODEREVIEW_HOME` was deleted could not be stopped by name and
    lingered forever. A test run leaked roughly a hundred of them. Fixed two ways: an orphan
    watchdog in the daemon that exits when its pid file or socket disappears, and a `reap()`

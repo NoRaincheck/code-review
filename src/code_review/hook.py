@@ -63,8 +63,18 @@ def hook_body() -> str:
     )
 
 
+def hook_path(repo: Path) -> Path:
+    """Absolute path of the post-commit hook, resolved by git.
+
+    Not ``.git/hooks/post-commit``: in a linked worktree ``.git`` is a file, so that path
+    cannot exist. git keeps hooks in the shared common directory, which means a hook
+    installed from any worktree applies to all of them.
+    """
+    return git.hooks_dir(repo) / "post-commit"
+
+
 def is_installed(repo: Path) -> bool:
-    path = paths.post_commit_hook_path(repo)
+    path = hook_path(repo)
     if not path.exists():
         return False
     try:
@@ -80,7 +90,7 @@ def install(repo: Path, *, force: bool = False) -> Path:
     the block embeds absolute paths that can go stale: a moved interpreter, a changed
     ``CODEREVIEW_HOME``, or a hook written by an older version of this tool.
     """
-    path = paths.post_commit_hook_path(repo)
+    path = hook_path(repo)
     body = hook_body()
 
     if path.exists() and not force:
@@ -90,7 +100,7 @@ def install(repo: Path, *, force: bool = False) -> Path:
                 return path  # the embedded paths are already current
             # Rewrite, keeping whatever surrounds our block.
             preserved = _strip_managed_block(existing)
-            paths.hooks_dir(repo).mkdir(parents=True, exist_ok=True)
+            hook_path(repo).parent.mkdir(parents=True, exist_ok=True)
             path.write_text(preserved + body, encoding="utf-8")
             _make_executable(path)
             return path
@@ -100,7 +110,7 @@ def install(repo: Path, *, force: bool = False) -> Path:
                 f"Re-run with --force to wrap the existing hook."
             )
 
-    paths.hooks_dir(repo).mkdir(parents=True, exist_ok=True)
+    hook_path(repo).parent.mkdir(parents=True, exist_ok=True)
     preserved = ""
     if path.exists() and force:
         existing = path.read_text(encoding="utf-8")
@@ -161,7 +171,7 @@ def _command_line() -> str:
 
 def uninstall(repo: Path) -> bool:
     """Remove the managed block. Returns True if something was removed."""
-    path = paths.post_commit_hook_path(repo)
+    path = hook_path(repo)
     if not path.exists():
         return False
     existing = path.read_text(encoding="utf-8")

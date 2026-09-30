@@ -45,14 +45,6 @@ def config_path(repo: Path) -> Path:
     return repo / CONFIG_FILE_NAME
 
 
-def hooks_dir(repo: Path) -> Path:
-    return repo / ".git" / "hooks"
-
-
-def post_commit_hook_path(repo: Path) -> Path:
-    return hooks_dir(repo) / "post-commit"
-
-
 def ensure_home() -> Path:
     directory = home_dir()
     directory.mkdir(parents=True, exist_ok=True)
