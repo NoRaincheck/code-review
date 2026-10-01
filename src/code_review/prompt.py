@@ -6,7 +6,27 @@ without spawning an agent or touching a repository.
 
 from __future__ import annotations
 
+import re
+
 from .git import Commit
+
+# Longest run of backticks anywhere in a diff, used to pick an unbreakable code fence.
+_BACKTICK_RUN = re.compile(r"`+")
+
+
+def fence_for(text: str, *, minimum: int = 3) -> str:
+    """Return a code fence longer than any backtick run in *text*.
+
+    A diff is untrusted content: it may contain a markdown code fence of its own, as any
+    README or markdown file will. In a unified diff a context line is prefixed with a single
+    space, and CommonMark accepts up to three spaces of indentation before a closing fence,
+    so an unchanged ```` ``` ```` line closes the fence early and the remainder of the diff
+    escapes into the prompt's own structure. Choosing a fence longer than anything in the
+    diff makes that impossible.
+    """
+    longest = max((len(run) for run in _BACKTICK_RUN.findall(text)), default=0)
+    return "`" * max(minimum, longest + 1)
+
 
 BASE_INSTRUCTIONS = """\
 You are reviewing a single git commit. Report problems only; do not restate what the
@@ -75,12 +95,16 @@ def _commit_section(commit: Commit) -> str:
 def build_prompt(commit: Commit, guidelines: str = "") -> str:
     """Assemble the full review prompt for *commit*.
 
-    The diff is inlined so a review usually needs no shell access at all; the read-only
-    git allowlist exists for follow-up questions about surrounding code.
+    The diff is inlined so a review usually needs no shell access at all; the read-only git
+    allowlist exists for follow-up questions about surrounding code.
     """
     sections = [BASE_INSTRUCTIONS.strip(), "", _commit_section(commit)]
     guidelines = guidelines.strip()
     if guidelines:
         sections.extend(["", GUIDELINES_HEADER.strip(), "", guidelines])
-    sections.extend(["", OUTPUT_HEADER.strip(), "", "## Diff", "", "```diff", commit.diff, "```"])
+
+    fence = fence_for(commit.diff)
+    sections.extend(
+        ["", OUTPUT_HEADER.strip(), "", "## Diff", "", f"{fence}diff", commit.diff, fence]
+    )
     return "\n".join(sections)
