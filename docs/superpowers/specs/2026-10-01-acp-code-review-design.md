@@ -559,6 +559,10 @@ deliberately built to be safe to run at any moment, because that is what makes i
   digits happened to be a dead pid the reap would have deleted their worktree. A marker cannot
   be produced by accident. An agent that deletes the marker costs a reap rather than somebody's
   work, which is the right way round for a step whose failure mode is deletion.
+* The marker also holds the creating pid, and it is the only place the pid is read from. The
+  directory name is chosen by whoever made the directory; the marker is written by us, so there
+  is no reason to trust the name once the marker exists. This was pointed out by a real agent
+  reviewing this work, which is the whole argument for running the tool on its own history.
 * It only removes worktrees whose owning process is **gone**. This is the part that is easy to
   get wrong. An inline review and the daemon can run at the same time against one repository, and
   a reap that ignored liveness would delete the worktree a review was actively using, turning a
@@ -588,7 +592,14 @@ uncommitted files, and cannot see a branch name, because it is at a detached che
 reviewed commit. For a commit review that is a reduction in false positives rather than a loss,
 and it was checked against a real agent rather than assumed: four reviews on a repository with
 untracked files and a populated ``.gitignore`` produced correct relative citations, no phantom
-"missing file" findings, and no mention of the temporary path anywhere in the stored output.
+"missing file" findings, and no mention of the temporary path in the review text.
+
+The stored *tool log* did embed the temporary path, which the markdown did not, and an earlier
+version of this document claimed otherwise on the strength of having only checked the markdown.
+Every command the agent runs names a directory that no longer exists, so the worktree root is
+rewritten to ``<worktree>`` before the log is persisted. Only the title is rewritten, and only
+by substitution: anything unrecognised in the log is passed through rather than pattern-matched,
+since guessing at the agent's payload shape is how data goes missing quietly.
 
 This is confinement of accidents, not a sandbox. The worktree shares the object's store and
 config, and a determined agent can still reach outside it. That was never the policy's job:
@@ -852,3 +863,34 @@ async with spawn_agent_process(client, command, *args, env=env, cwd=cwd) as (con
   policy instead, which holds regardless of what modes an agent advertises.
 - Pin exactly. `1.0.0rc2` already removed `acp.helpers` and expanded `SessionUpdate` from 13
   to 16 variants; an unpinned install would walk us into that silently.
+
+### Found by dogfooding: a review that never happened was reported as a success
+
+Reviewing this tool's own commits with a real agent, one review came back as
+``stop_reason=end_turn`` with the markdown containing nothing but the agent narrating its own
+approach:
+
+```
+I'll start by examining the repository to understand the context and verify the changes.
+Let me read the full current state of the key files.
+Let me empirically probe the edge cases in `owner_is_gone` against real git.
+```
+
+Sixteen exploratory tool calls, no verdict, no findings, stored as ``completed``. Nothing
+downstream could tell: the stop reason was the normal one, the status was the normal one, and a
+user reading that review would believe they had been given an assessment.
+
+There is now a ``warning`` column, and it is deliberately neither of the two obvious answers.
+Calling it a failure would discard real output and misreport a turn that did complete. Calling
+it a clean success presents scratch notes as a verdict. So the review stays ``completed``, the
+markdown is kept, and a warning is stored and printed by ``show`` before the text, because a
+warning somebody scrolls past is not a warning at all.
+
+The check looks for a verdict line in the first few non-empty lines. The window is narrow on
+purpose. An agent that clears its throat before answering has still reviewed, and flagging that
+would be false positives on good output, so a short preamble is tolerated; but narration that
+mentions the word "issues" must not talk its way past the check, so only whole lines are
+matched, and a verdict twenty lines down does not count.
+
+This is the second defect the fake agent could never have found, and the first one that needed
+a real agent, a real repository and a diff big enough to make the agent explore.

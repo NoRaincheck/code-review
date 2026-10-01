@@ -348,3 +348,63 @@ async def test_agent_version_is_not_reported_but_agent_is(
     script = write_script(tmp_path, {"chunks": ["ok"]})
     outcome = await run_review(agent_config(script), repo, commit)
     assert outcome.agent == sys.executable
+
+
+# -- the worktree path must not be persisted verbatim ---------------------------------
+
+
+def test_the_worktree_path_is_rewritten_in_the_stored_tool_log(tmp_path: Path) -> None:
+    """The agent is given a temp directory whose name carries our pid and changes every run.
+
+    Stored verbatim, every command in the log refers to a path that no longer exists and means
+    nothing to whoever reads the review later, and two reviews of the same commit cannot be
+    compared. It is rewritten to a stable placeholder instead.
+    """
+    from code_review.agent.runner import WORKTREE_PLACEHOLDER, _with_root_rewritten
+
+    root = tmp_path / "code-review-4242-abcdef"
+    root.mkdir()
+    log = [
+        {"title": f"cat {root}/src/app.py", "kind": "read", "status": "completed"},
+        {"title": f"cd {root} && git log --oneline", "kind": "execute"},
+    ]
+    rewritten = _with_root_rewritten(log, root)
+
+    for entry in rewritten:
+        assert "code-review-4242" not in entry["title"]
+        assert WORKTREE_PLACEHOLDER in entry["title"]
+    assert f"cat {WORKTREE_PLACEHOLDER}/src/app.py" == rewritten[0]["title"]
+
+
+def test_rewriting_the_tool_log_changes_nothing_else(tmp_path: Path) -> None:
+    """Only the title is rewritten, and only by substitution.
+
+    Pattern-matching the whole log would mean guessing at the agent's payload shape, and a
+    wrong guess loses data silently. Anything unrecognised is passed through untouched.
+    """
+    from code_review.agent.runner import _with_root_rewritten
+
+    root = tmp_path / "code-review-1-x"
+    root.mkdir()
+    log = [
+        {"title": f"ls {root}", "kind": "execute", "status": "completed", "decision": "deny"},
+        {"title": None, "kind": "read"},
+        {"no_title_at_all": f"{root}"},
+    ]
+    rewritten = _with_root_rewritten(log, root)
+
+    assert rewritten[0]["decision"] == "deny", "other fields must survive verbatim"
+    assert rewritten[0]["status"] == "completed"
+    assert rewritten[1]["title"] is None, "a missing title must not raise"
+    assert rewritten[2]["no_title_at_all"] == f"{root}", "unknown fields are left alone"
+    assert log[0]["title"] == f"ls {root}", "the input must not be mutated"
+
+
+def test_a_path_outside_the_worktree_is_left_alone(tmp_path: Path) -> None:
+    """Only our own root is rewritten, so an agent's own paths survive for diagnosis."""
+    from code_review.agent.runner import _with_root_rewritten
+
+    root = tmp_path / "code-review-1-x"
+    root.mkdir()
+    log = [{"title": "cat /etc/passwd", "kind": "read"}]
+    assert _with_root_rewritten(log, root)[0]["title"] == "cat /etc/passwd"

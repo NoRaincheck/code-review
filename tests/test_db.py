@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from code_review.db import Database, Status
+from code_review.db import SCHEMA_VERSION, Database, Status
 
 
 @pytest.fixture
@@ -261,7 +261,7 @@ def test_reopening_preserves_data(tmp_path: Path) -> None:
 def test_schema_version_is_recorded(database: Database) -> None:
     row = database._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     assert row is not None
-    assert row["value"] == "1"
+    assert row["value"] == SCHEMA_VERSION
 
 
 def test_reopening_an_old_database_is_tolerated(tmp_path: Path) -> None:
@@ -430,7 +430,7 @@ def test_schema_version_write_tolerates_a_locked_database(tmp_path: Path) -> Non
     with Database(path) as db:
         row = db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         assert row is not None
-        assert row["value"] == "1"
+        assert row["value"] == SCHEMA_VERSION
 
 
 def test_schema_is_created_for_a_fresh_database(tmp_path: Path) -> None:
@@ -446,3 +446,76 @@ def test_schema_is_created_for_a_fresh_database(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert {"reviews", "meta"} <= tables
+
+
+def test_a_warning_is_stored_and_read_back(tmp_path: Path) -> None:
+    """A review that finished on time but missed the output contract is neither a success
+    presented as fact nor an error that throws the work away."""
+    with Database(tmp_path / "warn.db") as db:
+        review_id, _ = db.enqueue("b" * 40, "main")
+        db.complete(
+            review_id,
+            markdown="Let me start by reading the files.",
+            stop_reason="end_turn",
+            agent="fake",
+            warning="the agent narrated its approach instead of reviewing",
+        )
+        stored = db.get("b" * 40)
+
+    assert stored is not None
+    assert stored.status is Status.COMPLETED
+    assert stored.error is None, "a warning must not masquerade as a failure"
+    assert stored.markdown == "Let me start by reading the files.", "the work is not discarded"
+    assert stored.warning == "the agent narrated its approach instead of reviewing"
+
+
+def test_a_clean_review_has_no_warning(tmp_path: Path) -> None:
+    with Database(tmp_path / "clean.db") as db:
+        review_id, _ = db.enqueue("c" * 40, "main")
+        db.complete(review_id, markdown="No issues found.", stop_reason="end_turn", agent="fake")
+        stored = db.get("c" * 40)
+
+    assert stored is not None and stored.warning is None
+
+
+def test_an_existing_database_gains_the_warning_column(tmp_path: Path) -> None:
+    """A database written by an earlier release has no `warning` column, and `CREATE TABLE IF
+    NOT EXISTS` will not add one, so the migration is the only thing that can."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """CREATE TABLE reviews (
+                   id INTEGER PRIMARY KEY, sha TEXT NOT NULL, branch TEXT, status TEXT NOT NULL,
+                   markdown TEXT, error TEXT, stop_reason TEXT, agent TEXT, agent_version TEXT,
+                   usage_json TEXT, tool_log_json TEXT, created_at TEXT NOT NULL,
+                   started_at TEXT, finished_at TEXT);
+               CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+               INSERT INTO meta(key, value) VALUES('schema_version', '1');
+               INSERT INTO reviews(sha, status, created_at)
+                   VALUES('dddddddddddddddddddddddddddddddddddddddd', 'queued', 'now');"""
+        )
+        conn.commit()
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(reviews)")}
+    finally:
+        conn.close()
+    assert "warning" not in columns, "precondition: this database predates the column"
+
+    with Database(path) as db:
+        migrated = {r[1] for r in db._conn.execute("PRAGMA table_info(reviews)")}
+        assert "warning" in migrated
+        assert db.get("d" * 40) is not None, "existing rows must survive the migration"
+        assert (
+            db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+            == SCHEMA_VERSION
+        )
+
+
+def test_migrating_twice_is_harmless(tmp_path: Path) -> None:
+    """The migration runs on every open, so it has to be idempotent rather than merely working."""
+    path = tmp_path / "twice.db"
+    for _ in range(3):
+        with Database(path) as db:
+            db.enqueue("e" * 40, "main")
+    with Database(path) as db:
+        assert db.get("e" * 40) is not None

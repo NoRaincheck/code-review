@@ -215,6 +215,7 @@ class Worker:
             agent_version=outcome.agent_version,
             usage=outcome.usage,
             tool_log=outcome.tool_log,
+            warning=outcome.warning,
         )
         self.stats.completed += 1
         if not outcome.is_complete:

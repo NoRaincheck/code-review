@@ -257,7 +257,10 @@ def _review_inline(repo: Path, sha: str, args: argparse.Namespace) -> int:
             agent_version=outcome.agent_version,
             usage=outcome.usage,
             tool_log=outcome.tool_log,
+            warning=outcome.warning,
         )
+        if outcome.warning is not None:
+            print(f"code-review: warning: {outcome.warning}", file=sys.stderr)
         print(outcome.markdown)
     except ReviewError as exc:
         return _fail(str(exc))
@@ -333,6 +336,11 @@ def _render(review: Any, *, raw: bool) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    # Announced before the markdown, on both the raw and the rendered path, because a warning
+    # the reader scrolls past is no warning at all.
+    if review.warning:
+        print(f"code-review: warning: {review.warning}", file=sys.stderr)
 
     if raw:
         print(review.markdown or "")

@@ -66,8 +66,12 @@ _OWNER = re.compile(rf"^{re.escape(PREFIX)}(?P<pid>\d+)-")
 #: looks exactly like ours, and if that number happened to be a dead pid the reap would delete
 #: their worktree. A marker file cannot be produced by accident.
 #:
-#: An agent that deletes the marker costs us a reap, not a user's worktree, which is the right
-#: way round for something whose failure mode is deleting work.
+#: It holds the creating pid as well, and that is the only place the pid is read from. A name
+#: is chosen by whoever created the directory; a marker is written by us, so there is no reason
+#: to trust the name for anything once the marker exists.
+#:
+#: An agent that deletes or corrupts the marker costs us a reap, not a user's worktree, which
+#: is the right way round for something whose failure mode is deleting work.
 MARKER = ".code-review-worktree"
 
 DEFAULT_TIMEOUT = 120
@@ -211,27 +215,44 @@ def _is_marked(path: Path) -> bool:
         return False
 
 
+def owner_pid(path: Path) -> int | None:
+    """The pid recorded in *path*'s marker, or None if it is not one of ours.
+
+    The marker is the single source of truth for both ownership and liveness. Ownership
+    obviously has to be provable rather than inferred, and once the marker exists there is no
+    reason to read the pid back out of the directory name: a name is chosen by a caller, a
+    marker is written by us. Splitting the two meant the name still decided liveness, which
+    left the guessable half of the pair load-bearing for the thing it should not decide.
+    """
+    try:
+        recorded = (path / MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return int(recorded)
+    except ValueError:
+        return None
+
+
 def owner_is_gone(path: Path) -> bool:
     """Whether the process that created *path* is no longer running.
 
     This is what makes reaping safe to do from a second process. An inline ``review`` and the
-    daemon can run at the same time against the same repository, and a reap that ignored liveness
-    would delete the worktree a review was actively using. Attributing each worktree to a pid
-    and only reaping the dead ones removes that hazard.
+    daemon can run at the same time against the same repository, and a reap that ignored
+    liveness would delete the worktree a review was actively using, turning a housekeeping step
+    into a way to break a review in flight.
 
     A reused pid makes this conservative in the safe direction: a stale worktree is left alone
     until that process exits, rather than being removed out from under a live review.
     """
-    match = _OWNER.match(path.name)
-    if match is None:
-        return False
-    pid = int(match.group("pid"))
-    if pid == os.getpid():
+    pid = owner_pid(path)
+    if pid is None or pid == os.getpid():
         return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
     except PermissionError:
+        # The process exists and belongs to someone else. Not evidence that it is dead.
         return False
     return False

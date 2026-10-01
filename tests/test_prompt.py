@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from code_review.git import Commit
-from code_review.prompt import build_prompt, fence_for
+from code_review.prompt import build_prompt, fence_for, missing_verdict
 
 
 def make(**overrides: object) -> Commit:
@@ -219,3 +221,74 @@ def test_subject_and_body_are_both_inside_the_message_fence() -> None:
     between = lines[opening + 1 : first_close]
     assert "subj line" in between
     assert "body line" in between
+
+
+# -- did the agent actually review? --------------------------------------------------
+#
+# Found by pointing the tool at its own history: a real agent spent a turn on sixteen
+# exploratory tool calls, narrated what it was about to do, and ended the turn. stop_reason
+# was end_turn, so nothing looked wrong, and the notes were stored as a successful review.
+
+
+def test_narration_is_not_mistaken_for_a_review() -> None:
+    narration = (
+        "I'll start by examining the repository to understand the context and verify the "
+        "changes.\n\nLet me read the full current state of the key files.\n"
+    )
+    warning = missing_verdict(narration)
+    assert warning is not None
+    assert "verdict" in warning
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "No issues found.",
+        "no issues found",
+        "1 issue found.\n\n### Something\n`a.py:1` - because.",
+        "2 issues found.\n",
+        "1 issue(s) found.\n",
+        "No problems found.",
+        "3 issues (2 minor) found.",
+    ],
+)
+def test_a_real_verdict_is_accepted(markdown: str) -> None:
+    assert missing_verdict(markdown) is None
+
+
+def test_a_verdict_after_a_short_preamble_is_still_a_review() -> None:
+    """An agent that clears its throat first has still reviewed.
+
+    Flagging that would be a false positive on good output, and second-guessing wording is
+    how you start throwing away reviews that are fine.
+    """
+    assert missing_verdict("Sure, here is the review.\n\nNo issues found.\n") is None
+
+
+def test_a_verdict_far_below_the_opening_is_not_accepted() -> None:
+    """The window is deliberately narrow.
+
+    A long essay with a verdict at the bottom is not the contract being met, and a wide
+    window would let narration talk its way past the check by mentioning the word "issues".
+    """
+    essay = "\n\n".join(f"Filler line {n} about the code." for n in range(20))
+    assert missing_verdict(f"{essay}\n\nNo issues found.\n") is not None
+
+
+def test_a_verdict_mentioned_mid_sentence_does_not_count() -> None:
+    assert missing_verdict("I expect to find 2 issues found later, let me check.\n") is not None
+
+
+def test_a_heading_first_review_is_flagged_not_discarded() -> None:
+    assert missing_verdict("## Review\n\n### Bug\n`a.py:1` - real finding.\n") is not None
+
+
+def test_an_empty_review_is_flagged() -> None:
+    assert missing_verdict("") is not None
+    assert missing_verdict("   \n\n  \n") is not None
+
+
+def test_findings_without_a_verdict_are_still_flagged() -> None:
+    """The dangerous case: real findings, but nothing to tell the reader it is a review."""
+    markdown = "### Division by zero\n`calc.py:3` - `a / b` with no guard.\n"
+    assert missing_verdict(markdown) is not None
