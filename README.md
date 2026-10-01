@@ -85,6 +85,11 @@ code-review hook uninstall       # remove the hook
 abbreviation. An ambiguous abbreviation is an error listing the candidates rather than a
 guess, since showing one commit's review for another is worse than showing none.
 
+Merge commits are diffed against their first parent, so a merge review covers what the merge
+brought in. A commit with no diff at all, such as an empty commit, is recorded as completed but
+carries a warning, because the agent's verdict is then about nothing and would otherwise be
+indistinguishable from a genuine clean review.
+
 `show --tools` lists what the agent actually did: every tool call, which were refused and why,
 and how many ran **without asking** — which is to say without ever being subject to the policy.
 That last number is the per-review version of the caveat in [Safety](#safety), and it is worth

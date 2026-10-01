@@ -873,6 +873,35 @@ async with spawn_agent_process(client, command, *args, env=env, cwd=cwd) as (con
 - Pin exactly. `1.0.0rc2` already removed `acp.helpers` and expanded `SessionUpdate` from 13
   to 16 variants; an unpinned install would walk us into that silently.
 
+### Merge commits were reviewed with no diff at all
+
+`git show` produces no patch for a merge commit unless `--cc` or `-m` is given. This module
+asked it for one anyway, so every merge was handed to the agent with an empty diff, and the
+agent returned "No issues found." about code it had never been shown.
+
+That is worse than a missing feature, because it is invisible. `post-commit` fires on every
+merge, so a repository that merges regularly accumulates verdicts that look exactly like clean
+reviews of real code, and `list` shows them beside genuine clean reviews with nothing to tell
+them apart. The docstring for `load_commit` had claimed merges were diffed against the first
+parent all along, so the documentation described the intended behaviour and the code did
+something else.
+
+Merges are now diffed against their first parent explicitly, which is the conventional reading
+of "what did this commit introduce" and is what makes a merge review worth having: the diff
+shows the files the merge brought in, and excludes what the target branch already had.
+
+A commit that genuinely has no diff is a different case and cannot be fixed, because there is
+nothing to review. An empty commit, or a merge that introduced no changes, produces a real
+verdict about nothing. Those now carry a warning saying so, reusing the mechanism built for the
+narration case rather than inventing a second one. The review is still recorded as completed,
+because the turn did finish and discarding the output would be its own loss; the warning is
+what distinguishes it.
+
+This is the second defect the same class of mistake produced: an agent asked to assess nothing
+answers "nothing to report", and that answer is recorded with the same confidence as an
+assessment of real code. A missing-verdict check cannot catch it, because the agent does produce
+a verdict. It had to be caught by running the tool over commits that exist in real repositories.
+
 ### Auditing the safety claims, and the recommended mitigation was broken
 
 Every other claim in this document had been tested. The security ones had not, so they were

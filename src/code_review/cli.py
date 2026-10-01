@@ -469,10 +469,10 @@ def cmd_list(args: argparse.Namespace) -> int:
             )
         if warned:
             print()
-            print(
-                f"{warned} review(s) marked ! completed without producing a verdict. "
-                f"Run `code-review show <sha>` for the detail."
-            )
+            # Deliberately not worded as "no verdict", which is only one of the reasons a
+            # review gets marked. A commit with no diff does produce a verdict, just not a
+            # meaningful one, and a summary that claimed otherwise would be its own lie.
+            print(f"{warned} review(s) marked !. Run `code-review show <sha>` for the detail.")
         return EXIT_OK
     finally:
         database.close()
@@ -516,9 +516,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             if warned := database.count_warned():
                 print()
                 print(
-                    f"  {warned} of those completed without producing a verdict; "
-                    f"they may be the agent's notes rather than a review.\n"
-                    f"  `code-review list` marks them with !."
+                    f"  {warned} of those carry a warning: the output may be the agent's notes "
+                    f"rather than a review,\n  or the commit may have had no diff to review. "
+                    f"`code-review list` marks them with !."
                 )
         finally:
             database.close()

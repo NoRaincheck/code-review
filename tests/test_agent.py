@@ -7,6 +7,7 @@ actual outcomes. No vendor CLI and no network.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -408,3 +409,51 @@ def test_a_path_outside_the_worktree_is_left_alone(tmp_path: Path) -> None:
     root.mkdir()
     log = [{"title": "cat /etc/passwd", "kind": "read"}]
     assert _with_root_rewritten(log, root)[0]["title"] == "cat /etc/passwd"
+
+
+# -- a commit with nothing to review must not look like a clean review ---------------
+
+
+async def test_a_commit_with_no_diff_is_warned_about(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    """An empty commit produces a real "No issues found." and it is worth precisely nothing.
+
+    `post-commit` fires on every commit, so a repository with the occasional empty commit would
+    collect verdicts that look exactly like clean reviews of real code. Distinguishing them is
+    the difference between a history of assessments and a history of noise.
+    """
+    empty = dataclasses.replace(commit, diff="")
+    script = write_script(tmp_path, {"chunks": ["No issues found."]})
+    runner = ReviewRunner(agent_config(script), repo)
+    outcome = await runner.review(empty)
+
+    assert outcome.markdown == "No issues found."
+    assert outcome.warning is not None
+    assert "no diff" in outcome.warning
+    # The review is still recorded as completed: the turn did finish, and discarding the output
+    # would be its own loss. The warning is what distinguishes it.
+    assert outcome.is_complete
+
+
+async def test_a_commit_with_whitespace_only_diff_is_still_warned_about(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    """Whitespace is not a reviewable change either."""
+    blank = dataclasses.replace(commit, diff="\n\n   \n")
+    script = write_script(tmp_path, {"chunks": ["No issues found."]})
+    runner = ReviewRunner(agent_config(script), repo)
+    outcome = await runner.review(blank)
+
+    assert outcome.warning is not None and "no diff" in outcome.warning
+
+
+async def test_a_real_commit_is_not_warned_about(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    """The warning must not fire on ordinary reviews, or it is noise and gets ignored."""
+    script = write_script(tmp_path, {"chunks": ["No issues found."]})
+    runner = ReviewRunner(agent_config(script), repo)
+    outcome = await runner.review(commit)
+
+    assert outcome.warning is None
