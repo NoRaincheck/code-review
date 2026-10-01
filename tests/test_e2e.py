@@ -156,6 +156,85 @@ def test_show_exits_nonzero_for_an_unreviewed_commit(scripted_repo: tuple[Path, 
     assert "no review" in result.stderr
 
 
+def test_show_refuses_an_ambiguous_abbreviation(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """Two reviewed commits sharing a prefix must not resolve to an arbitrary one.
+
+    Showing one commit's review for another is worse than showing nothing.
+    """
+    database = Database.for_repo(repo)
+    try:
+        shared = "abcd"
+        database.enqueue(shared + "111" + "0" * 33, "main")
+        database.enqueue(shared + "222" + "0" * 33, "main")
+    finally:
+        database.close()
+
+    result = run_cli("show", shared, "--repo", str(repo))
+    assert result.returncode == 3, result.stdout
+    assert "ambiguous" in result.stderr
+    assert shared + "111" in result.stderr
+    assert shared + "222" in result.stderr
+
+
+def test_show_resolves_a_unique_abbreviation(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    database = Database.for_repo(repo)
+    try:
+        sha = "beef" + "0" * 36
+        review_id, _ = database.enqueue(sha, "main")
+        database.complete(review_id, markdown="unique review", stop_reason="end_turn", agent="fake")
+    finally:
+        database.close()
+
+    result = run_cli("show", "beef", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "unique review" in result.stdout
+
+
+def test_show_finds_a_review_after_the_commit_is_gone(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """A review must survive a rebase that removes the commit from the repository."""
+    script = tmp_path / "survive.json"
+    script.write_text(json.dumps({"chunks": ["review that outlived its commit"]}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n",
+        encoding="utf-8",
+    )
+    result = run_cli("review", second_commit, "--wait", "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+
+    # Rewrite history so the reviewed commit no longer exists at all. Expiring the
+    # reflog and pruning is required: reset alone leaves the object reachable, which would
+    # make the test pass without exercising the path that matters.
+    subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=repo, check=True)
+    subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"], cwd=repo, check=True)
+    subprocess.run(["git", "gc", "--prune=now", "-q"], cwd=repo, check=True)
+    gone = subprocess.run(
+        ["git", "cat-file", "-e", second_commit],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+    )
+    assert gone.returncode != 0, "precondition: the commit object should be gone"
+
+    # git cannot resolve it, but the stored review is still reachable by sha.
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{second_commit}^{{commit}}"],
+        cwd=repo,
+        capture_output=True,
+        check=False,
+    )
+    assert resolved.returncode != 0, "precondition: git should not resolve the commit"
+
+    shown = run_cli("show", second_commit, "--repo", str(repo))
+    assert shown.returncode == 0, shown.stderr
+    assert "review that outlived its commit" in shown.stdout
+
+
 def test_review_is_queued_not_duplicated(scripted_repo: tuple[Path, str]) -> None:
     repo, sha = scripted_repo
     assert run_cli("review", sha, "--repo", str(repo)).returncode == 0

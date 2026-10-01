@@ -19,12 +19,13 @@ from .config import ConfigError
 from .daemon import client as daemon_client
 from .daemon import server as daemon_server
 from .daemon import supervisor
-from .db import Database, Status
+from .db import Database, Review, Status
 from .git import GitError
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NO_REVIEW = 2
+EXIT_AMBIGUOUS = 3
 
 
 # -- helpers ---------------------------------------------------------------
@@ -49,26 +50,53 @@ def _open_db(repo: Path) -> Database:
     return Database.for_repo(repo)
 
 
-def _resolve_review_sha(repo: Path, rev: str | None) -> str | None:
-    """Map a user-supplied rev to a full sha, or None when it cannot be resolved."""
-    if not rev or rev == "HEAD":
-        try:
-            return git.resolve_sha(repo, "HEAD")
-        except GitError:
-            return None
+class AmbiguousRevision(Exception):
+    """A short sha matched more than one reviewed commit."""
+
+    def __init__(self, prefix: str, candidates: list[str]) -> None:
+        super().__init__(f"{prefix!r} is ambiguous: it matches {len(candidates)} reviewed commits")
+        self.prefix = prefix
+        self.candidates = candidates
+
+
+def _find_review(database: Database, repo: Path, rev: str | None) -> Review:
+    """Resolve *rev* to exactly one stored review, or explain why it cannot.
+
+    Resolution order mirrors git: an exact sha, then a live revision such as HEAD, then a
+    unique abbreviation. Ambiguity is an error rather than a guess, because showing one
+    commit's review for another is worse than showing nothing.
+
+    Reviews for commits that no longer exist, after a rebase or reset, are still reachable
+    by sha because the database is not part of the repository.
+    """
+    if rev and rev != "HEAD":
+        exact = database.get(rev)
+        if exact is not None:
+            return exact
+
+    sha = _resolve_sha_safe(repo, rev)
+    if sha:
+        exact = database.get(sha)
+        if exact is not None:
+            return exact
+
+    if not rev:
+        raise LookupError("no review for HEAD")
+
+    candidates = database.matches_prefix(rev)
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise AmbiguousRevision(rev, [c.sha for c in candidates])
+    raise LookupError(f"no review for {rev}")
+
+
+def _resolve_sha_safe(repo: Path, rev: str | None) -> str | None:
+    target = rev or "HEAD"
     try:
-        return git.resolve_sha(repo, rev)
+        return git.resolve_sha(repo, target)
     except GitError:
-        return None  # may still be a stored review for a rewritten sha
-
-
-def _find_review(database: Database, repo: Path, rev: str | None) -> Any:
-    sha = _resolve_review_sha(repo, rev)
-    if sha is not None:
-        review = database.get(sha)
-        if review is not None:
-            return review
-    return database.get(rev) if rev else None
+        return None
 
 
 def _relative_time(iso: str | None) -> str:
@@ -273,14 +301,19 @@ def cmd_show(args: argparse.Namespace) -> int:
     database = _open_db(repo)
     try:
         review = _find_review(database, repo, args.sha)
-        if review is None:
-            target = args.sha or "HEAD"
-            print(
-                f"code-review: no review for {target}. Run: code-review review {target}",
-                file=sys.stderr,
-            )
-            return EXIT_NO_REVIEW
         return _render(review, raw=args.raw)
+    except AmbiguousRevision as exc:
+        print(f"code-review: {exc}", file=sys.stderr)
+        for candidate in exc.candidates:
+            print(f"  {candidate}", file=sys.stderr)
+        return EXIT_AMBIGUOUS
+    except LookupError:
+        target = args.sha or "HEAD"
+        print(
+            f"code-review: no review for {target}. Run: code-review review {target}",
+            file=sys.stderr,
+        )
+        return EXIT_NO_REVIEW
     finally:
         database.close()
 

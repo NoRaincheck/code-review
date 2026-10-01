@@ -91,6 +91,12 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _like_pattern(prefix: str) -> str:
+    """Escape LIKE wildcards so a sha containing % or _ cannot match everything."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
 def _row_to_review(row: sqlite3.Row) -> Review:
     return Review(
         id=row["id"],
@@ -346,14 +352,24 @@ class Database:
     # -- retrieval --------------------------------------------------------
 
     def get(self, sha: str) -> Review | None:
-        row = self._conn.execute(
-            "SELECT * FROM reviews WHERE sha=? OR sha LIKE ?", (sha, f"{sha}%")
-        ).fetchone()
-        if row is None:
-            row = self._conn.execute(
-                "SELECT * FROM reviews WHERE sha LIKE ? ORDER BY id DESC LIMIT 1", (f"{sha}%",)
-            ).fetchone()
+        """Exact sha match. Does not accept an abbreviation."""
+        row = self._conn.execute("SELECT * FROM reviews WHERE sha=?", (sha,)).fetchone()
         return _row_to_review(row) if row is not None else None
+
+    def matches_prefix(self, prefix: str) -> list[Review]:
+        """Every review whose sha starts with *prefix*, oldest first.
+
+        Separate from :meth:`get` because a prefix can be ambiguous. git refuses an
+        ambiguous abbreviation rather than guessing, and so must this: silently returning one
+        of two commits would show a reviewer the wrong commit's findings.
+        """
+        if len(prefix) < 4:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM reviews WHERE sha LIKE ? ESCAPE '\\' ORDER BY id ASC",
+            (_like_pattern(prefix),),
+        ).fetchall()
+        return [_row_to_review(row) for row in rows]
 
     def get_by_id(self, review_id: int) -> Review | None:
         row = self._conn.execute("SELECT * FROM reviews WHERE id=?", (review_id,)).fetchone()

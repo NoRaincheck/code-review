@@ -165,12 +165,42 @@ def test_fail_error_is_truncated_to_a_sane_length(database: Database) -> None:
     assert len(review.error or "") <= 4000
 
 
-def test_get_by_short_sha(database: Database) -> None:
+def test_get_requires_an_exact_sha(database: Database) -> None:
+    """get() must not silently prefix-match; see matches_prefix for abbreviations."""
     sha = "1234567890abcdef" * 2 + "12345678"
     database.enqueue(sha)
-    review = database.get(sha[:8])
-    assert review is not None
-    assert review.sha == sha
+    assert database.get(sha) is not None
+    assert database.get(sha[:8]) is None
+
+
+def test_matches_prefix_finds_an_abbreviation(database: Database) -> None:
+    sha = "1234567890abcdef" * 2 + "12345678"
+    database.enqueue(sha)
+    found = database.matches_prefix(sha[:8])
+    assert [r.sha for r in found] == [sha]
+
+
+def test_matches_prefix_returns_every_candidate(database: Database) -> None:
+    """Ambiguity must be visible, so callers can refuse to guess."""
+    database.enqueue("abcd111" + "0" * 33, "main")
+    database.enqueue("abcd222" + "0" * 33, "main")
+    assert len(database.matches_prefix("abcd")) == 2
+    assert len(database.matches_prefix("abcd1")) == 1
+
+
+def test_matches_prefix_ignores_short_prefixes(database: Database) -> None:
+    """Below four characters a prefix is too weak to be worth matching."""
+    database.enqueue("abcd111" + "0" * 33, "main")
+    assert database.matches_prefix("abc") == []
+    assert len(database.matches_prefix("abcd")) == 1
+
+
+def test_matches_prefix_escapes_like_wildcards(database: Database) -> None:
+    """A sha containing % must not match every review."""
+    database.enqueue("a" * 39 + "%", "main")
+    database.enqueue("b" * 40, "main")
+    assert [r.sha for r in database.matches_prefix("a" * 39 + "%")] == ["a" * 39 + "%"]
+    assert database.matches_prefix("%") == []
 
 
 def test_get_returns_none_for_unknown_sha(database: Database) -> None:
