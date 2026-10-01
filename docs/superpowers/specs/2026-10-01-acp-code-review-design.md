@@ -527,16 +527,40 @@ So reviewing an old commit, or any commit after the tree has moved on, hands the
 contradicted by the files around it. It may reason about code that is no longer there, or
 miss a defect that a later commit happens to have fixed.
 
-**How much this matters is unverified.** An attempt to measure it could not be completed: the
-agent backend degraded during the session, answering a bare "reply with PONG" in 41 seconds and
-exceeding a 420-second budget twice. Every live measurement quoted elsewhere in this document
-was taken while the agent was fast and is unaffected, but this particular question remains
-open. It is recorded as a known limitation rather than a measured defect.
+**The main path is not affected.** `post-commit` fires immediately after the commit, so the
+working tree, HEAD and the reviewed sha are the same thing by construction. Verified. The
+mismatch only arises in three cases:
+
+1. a retroactive `code-review review <old-sha>`
+2. reviewing a sha from a worktree other than the one it was committed in
+3. a dirty tree at review time
+
+Case 2 is easy to hit and easy to miss: two worktrees of one repository have independent
+working trees, so reviewing a commit from the wrong one hands the agent files that contradict
+the diff. With per-worktree databases, a review can also be recorded in a worktree that never
+contained the commit.
+
+**How much this matters for those cases is unverified.** An attempt to measure it could not be
+completed: the agent backend degraded during the session, answering a bare "reply with PONG" in
+41 seconds and exceeding a 420-second budget twice. Every live measurement quoted elsewhere in
+this document was taken while the agent was fast and is unaffected, but this particular
+question remains open. Recorded as a known limitation rather than a measured defect, and scoped
+so it is not read as a defect in the primary flow.
 
 The obvious fix is to run the review inside a throwaway worktree at the reviewed commit, which
-would also mean any staging damage landed in the worktree instead of the user's checkout. That
-is an architectural change, and it was **not** made, because an architectural change to review
-isolation should not be shipped unvalidated while the agent cannot be reached to test it.
+would also mean any staging damage landed in the worktree instead of the user's checkout. It
+is a real architectural change and was **not** made unilaterally, for two reasons worth
+recording:
+
+- It writes to the repository. `git worktree add` mutates the shared `.git` directory to
+  register the worktree. Trading an occasional corrupted index for a controlled, removable
+  metadata write is defensible, but it is a trade, not a pure win, and it deserves a decision
+  rather than a quiet commit.
+- Its quality benefit could not be measured while the agent was unreachable. The mechanical
+  properties are testable offline, but "does the agent review better this way" is not.
+
+Until that decision is made, the mitigation for the affected cases is to review from the
+worktree that contains the commit, and to keep the tree clean when reviewing an old sha.
 
 ### Observed: a reviewing agent can leave the repository uncommittable
 
