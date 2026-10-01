@@ -386,6 +386,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                             "stop_reason": r.stop_reason,
                             "agent": r.agent,
                             "error": r.error,
+                            "warning": r.warning,
                             "created_at": r.created_at,
                             "finished_at": r.finished_at,
                         }
@@ -396,13 +397,25 @@ def cmd_list(args: argparse.Namespace) -> int:
             )
             return EXIT_OK
         print(f"{'SHA':<9} {'STATUS':<10} {'BRANCH':<20} {'WHEN':<10} SUBJECT")
+        warned = 0
         for review in reviews:
             first_line = (review.markdown or review.error or "").splitlines()
             subject = first_line[0][:40] if first_line else ""
             when = _relative_time(review.finished_at or review.created_at)
+            # A `!` in the status column, because `list` is what people scan and a review that
+            # produced no verdict has to be visible without opening each one. Left off the
+            # subject so the text stays the review's own words.
+            marker = "!" if review.warning else " "
+            warned += 1 if review.warning else 0
             print(
-                f"{review.short_sha:<9} {review.status.value:<10} "
+                f"{review.short_sha:<9} {marker}{review.status.value:<10} "
                 f"{(review.branch or '-'):<20} {when:<10} {subject}"
+            )
+        if warned:
+            print()
+            print(
+                f"{warned} review(s) marked ! completed without producing a verdict. "
+                f"Run `code-review show <sha>` for the detail."
             )
         return EXIT_OK
     finally:
@@ -444,6 +457,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             for status in Status:
                 print(f"  {status.value:<10} {counts.get(status.value, 0)}")
             print(f"  {'total':<10} {counts.get('total', 0)}")
+            if warned := database.count_warned():
+                print()
+                print(
+                    f"  {warned} of those completed without producing a verdict; "
+                    f"they may be the agent's notes rather than a review.\n"
+                    f"  `code-review list` marks them with !."
+                )
         finally:
             database.close()
     return EXIT_OK

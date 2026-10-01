@@ -257,8 +257,8 @@ class Database:
 
             conn.execute(
                 "UPDATE reviews SET status=?, branch=?, markdown=NULL, error=NULL, "
-                "stop_reason=NULL, usage_json=NULL, tool_log_json=NULL, agent=NULL, "
-                "agent_version=NULL, started_at=NULL, finished_at=NULL "
+                "warning=NULL, stop_reason=NULL, usage_json=NULL, tool_log_json=NULL, "
+                "agent=NULL, agent_version=NULL, started_at=NULL, finished_at=NULL "
                 "WHERE id=?",
                 (Status.QUEUED.value, branch, int(existing["id"])),
             )
@@ -342,7 +342,7 @@ class Database:
     def fail(self, review_id: int, error: str) -> None:
         with self.transaction() as conn:
             conn.execute(
-                "UPDATE reviews SET status=?, error=?, finished_at=? WHERE id=?",
+                "UPDATE reviews SET status=?, error=?, warning=NULL, finished_at=? WHERE id=?",
                 (Status.FAILED.value, error[:4000], _now(), review_id),
             )
 
@@ -361,7 +361,8 @@ class Database:
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE reviews SET status=?, markdown=COALESCE(?, markdown), "
-                "agent=COALESCE(?, agent), stop_reason='cancelled', finished_at=? WHERE id=?",
+                "agent=COALESCE(?, agent), stop_reason='cancelled', warning=NULL, "
+                "finished_at=? WHERE id=?",
                 (Status.CANCELLED.value, markdown, agent, _now(), review_id),
             )
 
@@ -413,6 +414,18 @@ class Database:
         params.extend([limit, offset])
         rows = self._conn.execute(query, params).fetchall()
         return [_row_to_review(row) for row in rows]
+
+    def count_warned(self) -> int:
+        """How many completed reviews carry a warning.
+
+        Counted here rather than in the CLI so the number cannot drift from the same column
+        the warning is stored in, and so it is queryable by anything reading the database.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM reviews WHERE warning IS NOT NULL AND status=?",
+            (Status.COMPLETED.value,),
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
 
     def counts(self) -> dict[str, int]:
         rows = self._conn.execute(
