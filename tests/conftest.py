@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,8 @@ import pytest
 from code_review.git import Commit
 
 
-def git(repo: Path, *args: str) -> str:
+def run_git(repo: Path, *args: str) -> str:
+    """Run a git command in *repo* and return stdout, failing the test if git fails."""
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
@@ -27,14 +29,14 @@ def repo(tmp_path: Path) -> Path:
     """An initialized git repository with one commit that changes a python file."""
     root = tmp_path / "repo"
     root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    git(root, "config", "user.email", "dev@example.com")
-    git(root, "config", "user.name", "Dev Example")
-    git(root, "config", "commit.gpgsign", "false")
+    run_git(root, "init", "-q", "-b", "main")
+    run_git(root, "config", "user.email", "dev@example.com")
+    run_git(root, "config", "user.name", "Dev Example")
+    run_git(root, "config", "commit.gpgsign", "false")
 
     (root / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
-    git(root, "add", "app.py")
-    git(root, "commit", "-q", "-m", "Add add()\n\nThe first implementation.")
+    run_git(root, "add", "app.py")
+    run_git(root, "commit", "-q", "-m", "Add add()\n\nThe first implementation.")
     return root
 
 
@@ -45,9 +47,9 @@ def second_commit(repo: Path) -> str:
         "def add(a, b):\n    return a - b\n\n\ndef div(a, b):\n    return a / b\n",
         encoding="utf-8",
     )
-    git(repo, "add", "app.py")
-    git(repo, "commit", "-q", "-m", "Fix sign error and add div()")
-    return git(repo, "rev-parse", "HEAD").strip()
+    run_git(repo, "add", "app.py")
+    run_git(repo, "commit", "-q", "-m", "Fix sign error and add div()")
+    return run_git(repo, "rev-parse", "HEAD").strip()
 
 
 @pytest.fixture
@@ -84,3 +86,13 @@ def isolated_home(monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture
 def python_executable() -> str:
     return sys.executable
+
+
+@pytest.fixture
+def git_run() -> Callable[..., str]:
+    """A callable for running git in a repository, e.g. ``git_run(repo, "rev-parse", "HEAD")``.
+
+    Exposed as a fixture rather than imported, because importing from ``conftest`` only
+    works when the interpreter happens to have the project root on ``sys.path``.
+    """
+    return run_git

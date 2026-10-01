@@ -255,6 +255,80 @@ async def test_usage_is_captured(repo: Path, commit: Commit, tmp_path: Path) -> 
     assert outcome.usage["cost"] == {"amount": 0.02, "currency": "USD"}
 
 
+# -- timeout and cancellation ---------------------------------------------
+
+
+async def test_timeout_raises_timeout_error_not_review_error(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    """A timeout must stay distinguishable from a failure.
+
+    Callers keep the partial markdown and label the review 'cancelled' rather than
+    'failed', which is only possible if the timeout is not wrapped in ReviewError.
+    """
+    script = write_script(tmp_path, {"chunks": ["partial findings"], "hang_after_chunks": True})
+    config = agent_config(script)
+    config = Config(
+        agent=config.agent,
+        review_guidelines=config.review_guidelines,
+        max_diff_bytes=config.max_diff_bytes,
+        review_timeout_seconds=1,
+        deny_unknown_commands=config.deny_unknown_commands,
+    )
+    with pytest.raises(TimeoutError):
+        await run_review(config, repo, commit)
+
+
+async def test_partial_markdown_survives_a_timeout(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    """The design promises partial output is kept, not discarded."""
+    script = write_script(
+        tmp_path, {"chunks": ["Found one bug at app.py:3"], "hang_after_chunks": True}
+    )
+    runner = ReviewRunner(agent_config(script), repo, timeout_seconds=1)
+    with pytest.raises(TimeoutError):
+        await runner.review(commit)
+    partial = runner.partial_markdown
+    assert partial is not None
+    assert "Found one bug" in partial
+
+
+async def test_partial_tool_log_survives_a_timeout(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    script = write_script(
+        tmp_path,
+        {
+            "tools": [
+                {
+                    "id": "c1",
+                    "kind": "read",
+                    "title": "read app.py",
+                    "raw_input": {"path": "app.py"},
+                    "request_permission": False,
+                }
+            ],
+            "chunks": ["looked at it"],
+            "hang_after_chunks": True,
+        },
+    )
+    runner = ReviewRunner(agent_config(script), repo, timeout_seconds=1)
+    with pytest.raises(TimeoutError):
+        await runner.review(commit)
+    assert runner.partial_tool_log, "tool activity before the timeout should be retained"
+
+
+async def test_timed_out_runner_has_no_final_outcome(
+    repo: Path, commit: Commit, tmp_path: Path
+) -> None:
+    script = write_script(tmp_path, {"chunks": ["x"], "hang_after_chunks": True})
+    runner = ReviewRunner(agent_config(script), repo, timeout_seconds=1)
+    with pytest.raises(TimeoutError):
+        await runner.review(commit)
+    assert runner.last_outcome is None
+
+
 # -- isolation -------------------------------------------------------------
 
 

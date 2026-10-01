@@ -193,10 +193,16 @@ def _review_inline(repo: Path, sha: str, args: argparse.Namespace) -> int:
         try:
             await runner.review(git.load_commit(repo, sha, max_diff_bytes=config.max_diff_bytes))
         except TimeoutError as exc:
-            database.cancel(review_id, runner.partial_markdown)
+            # Keep whatever streamed before the deadline; a partial review is worth more
+            # than none, and the row says so via status='cancelled'.
+            database.cancel(
+                review_id,
+                runner.partial_markdown,
+                agent=config.agent.label if config.agent else None,
+            )
             raise ReviewError(str(exc)) from exc
-        except ReviewError:
-            database.fail(review_id, "review failed")
+        except ReviewError as exc:
+            database.fail(review_id, str(exc))
             raise
         except BaseException as exc:
             database.fail(review_id, f"{type(exc).__name__}: {exc}")

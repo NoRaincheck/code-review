@@ -158,10 +158,7 @@ Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the
 ## Development
 
 ```bash
-uv run pytest               # 262 tests, no network, no vendor CLI
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy                 # strict
+./scripts/check.sh          # syntax, ruff, mypy --strict, tests, leaked-daemon check
 ```
 
 The ACP integration is tested against `tests/fake_agent.py`, a real ACP agent implemented

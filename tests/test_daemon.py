@@ -41,14 +41,25 @@ def configured_repo(repo: Path, second_commit: str, tmp_path: Path) -> tuple[Pat
 
 
 async def drain(worker: Worker, *, timeout: float = 30.0) -> None:
-    """Run the worker's loop until the queue for the registered repos is empty."""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while worker.queue_depth() > 0:
-        if asyncio.get_running_loop().time() > deadline:
-            raise AssertionError("worker did not drain the queue")
+    """Run the worker's loop until no review for the registered repos is in flight.
+
+    Waits for a terminal state rather than just an empty queue: claim_next removes a row
+    from 'queued' immediately, so queue depth alone reports empty while a review is still
+    running and an assertion after it would race the worker.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        pending = False
+        for database in worker._databases.values():
+            counts = database.counts()
+            if counts.get(Status.QUEUED.value, 0) or counts.get(Status.RUNNING.value, 0):
+                pending = True
+                break
+        if not pending:
+            return
         await asyncio.sleep(0.05)
-    # One more tick so a claim in progress finishes writing its result.
-    await asyncio.sleep(0.4)
+    raise AssertionError("worker did not finish the queue")
 
 
 # -- the worker loop -------------------------------------------------------
@@ -170,6 +181,69 @@ async def test_worker_snapshot_reports_current_review(
     snapshot = worker.snapshot()
     assert snapshot.repos == [str(repo.resolve())]
     assert worker.queue_depth() == 0
+
+
+async def test_worker_marks_a_timed_out_review_cancelled_with_partial_markdown(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """A review that overruns is 'cancelled' and keeps what it managed to produce."""
+    script = tmp_path / "slow.json"
+    script.write_text(json.dumps({"chunks": ["partial findings"], "hang_after_chunks": True}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        "review_timeout_seconds = 1\n",
+        encoding="utf-8",
+    )
+
+    worker = Worker()
+    worker.start()
+    try:
+        worker.database_for(repo).enqueue(second_commit)
+        worker.notify()
+        await drain(worker)
+    finally:
+        await worker.stop()
+
+    database = Database.for_repo(repo)
+    try:
+        review = database.get(second_commit)
+        assert review is not None
+        assert review.status is Status.CANCELLED, review.error
+        assert review.stop_reason == "cancelled"
+        assert review.markdown is not None
+        assert "partial findings" in review.markdown
+        # Which agent timed out is worth knowing even though nothing usable came back.
+        assert review.agent == sys.executable
+    finally:
+        database.close()
+
+
+async def test_worker_marks_a_failed_review_with_the_real_error(
+    repo: Path, second_commit: str
+) -> None:
+    """A failure must record why, not a generic placeholder."""
+    (repo / ".codereview.toml").write_text(
+        'review_agent = ["/nonexistent/agent-binary"]\n', encoding="utf-8"
+    )
+    worker = Worker()
+    worker.start()
+    try:
+        worker.database_for(repo).enqueue(second_commit)
+        worker.notify()
+        await drain(worker)
+    finally:
+        await worker.stop()
+
+    database = Database.for_repo(repo)
+    try:
+        review = database.get(second_commit)
+        assert review is not None
+        assert review.status is Status.FAILED
+        error = review.error or ""
+        assert "not found" in error
+        assert "/nonexistent/agent-binary" in error, error
+    finally:
+        database.close()
 
 
 async def test_worker_stop_is_safe_when_idle(repo: Path) -> None:

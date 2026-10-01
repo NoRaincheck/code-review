@@ -269,13 +269,23 @@ class Database:
                 (Status.FAILED.value, error[:4000], _now(), review_id),
             )
 
-    def cancel(self, review_id: int, markdown: str | None = None) -> None:
-        """Mark a review cancelled, keeping any partial markdown already collected."""
+    def cancel(
+        self,
+        review_id: int,
+        markdown: str | None = None,
+        *,
+        agent: str | None = None,
+    ) -> None:
+        """Mark a review cancelled, keeping any partial markdown already collected.
+
+        *agent* is recorded even though the review produced nothing usable: knowing which
+        agent timed out is the first thing worth knowing.
+        """
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE reviews SET status=?, markdown=COALESCE(?, markdown), "
-                "stop_reason='cancelled', finished_at=? WHERE id=?",
-                (Status.CANCELLED.value, markdown, _now(), review_id),
+                "agent=COALESCE(?, agent), stop_reason='cancelled', finished_at=? WHERE id=?",
+                (Status.CANCELLED.value, markdown, agent, _now(), review_id),
             )
 
     # -- retrieval --------------------------------------------------------

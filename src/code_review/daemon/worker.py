@@ -191,7 +191,7 @@ class Worker:
             # Keep whatever the agent managed to produce before the deadline; a partial
             # review of the files it reached is more useful than nothing.
             partial = runner.partial_markdown
-            database.cancel(review.id, partial)
+            database.cancel(review.id, partial, agent=config.agent.label if config.agent else None)
             self.stats.cancelled += 1
             log.warning("review of %s timed out", review.short_sha)
             return

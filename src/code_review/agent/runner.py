@@ -135,6 +135,11 @@ class ReviewRunner:
                 )
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            # Deliberately not wrapped. Callers distinguish a timeout from a failure in
+            # order to keep whatever markdown streamed before the deadline, and wrapping
+            # this in ReviewError would discard it and mislabel the review as broken.
+            raise
         except FileNotFoundError as exc:
             raise ReviewError(
                 f"agent command not found: {agent.command!r}. "

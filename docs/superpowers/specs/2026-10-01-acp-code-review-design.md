@@ -269,8 +269,18 @@ ignores the advertised capability must still not be able to mutate anything.
 Per-review timeout is `asyncio.wait_for(conn.prompt(...), timeout)`, not the SDK's
 `receive_timeout`, which is a connection-wide read-idle backstop and cannot express "5 minutes
 for the prompt, 5 seconds for initialize". On timeout we send `conn.cancel(session_id)`, then
-record `stop_reason='cancelled'` with the partial markdown we received, so a slow review is
-still useful output.
+record the review as `cancelled` with the partial markdown we received.
+
+`TimeoutError` is deliberately re-raised unwrapped rather than converted to `ReviewError`.
+That distinction is load-bearing: callers keep partial output and label the review `cancelled`
+instead of `failed`. Wrapping it made both timeout branches unreachable, and the first
+implementation of this showed up in the database as `status='failed'`, `error='review failed'`,
+and `markdown=NULL` — a promise in this document that silently did not hold.
+
+Partial retention is only useful for an agent that streams incrementally. Measured against
+`opencode acp`, which emits nothing until it has finished thinking, a review cut off before
+completion retains no markdown and `show` reports `(cancelled before any output)`. The row
+still records which agent was launched, which is the useful fact in that case.
 
 Agent-reported failures are recorded faithfully. `stop_reason` of `refusal`, `max_tokens`,
 `max_turn_requests`, and `max_tokens` all mean the review is incomplete; the markdown collected
@@ -369,7 +379,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-262 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+268 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
@@ -481,7 +491,14 @@ Recorded because each is a trap that looks correct in review.
    `git rev-parse --git-common-dir`. Worth noting that roborev, whose design this follows,
    calls out worktree support explicitly — so it was a gap I should have anticipated rather
    than discovered by running `init` in one.
-11. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
+11. **The timeout path did not work, though the document promised it did.** Zero tests
+   covered it. `review()`'s broad `except Exception` wrapped `TimeoutError` into
+   `ReviewError`, so the timeout branch in both the worker and the inline CLI path was
+   unreachable: a timed-out review was stored as `failed` with the literal error string
+   `"review failed"` and its markdown discarded. `TimeoutError` is now re-raised unwrapped,
+   the failure path records the real error, and there are tests for the timeout, the retained
+   partial markdown, and the retained tool log.
+12. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
    pid file, so a daemon whose `CODEREVIEW_HOME` was deleted could not be stopped by name and
    lingered forever. A test run leaked roughly a hundred of them. Fixed two ways: an orphan
    watchdog in the daemon that exits when its pid file or socket disappears, and a `reap()`

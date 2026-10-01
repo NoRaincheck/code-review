@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from code_review import git
-from tests.conftest import git as run_git
 
 
 def test_is_repo_detects_a_repository(repo: Path) -> None:
@@ -43,8 +42,8 @@ def test_current_branch(repo: Path) -> None:
     assert git.current_branch(repo) == "main"
 
 
-def test_current_branch_is_none_when_detached(repo: Path, second_commit: str) -> None:
-    run_git(repo, "checkout", "--detach", "-q", "HEAD")
+def test_current_branch_is_none_when_detached(repo: Path, second_commit: str, git_run) -> None:
+    git_run(repo, "checkout", "--detach", "-q", "HEAD")
     assert git.current_branch(repo) is None
 
 
@@ -70,8 +69,8 @@ def test_load_commit_resolves_a_short_sha(repo: Path) -> None:
     assert git.load_commit(repo, full[:8]).sha == full
 
 
-def test_load_commit_of_root_commit_has_no_parents(repo: Path) -> None:
-    root = run_git(repo, "rev-list", "--max-parents=0", "HEAD").strip()
+def test_load_commit_of_root_commit_has_no_parents(repo: Path, git_run) -> None:
+    root = git_run(repo, "rev-list", "--max-parents=0", "HEAD").strip()
     assert git.load_commit(repo, root).parents == ()
 
 
@@ -81,16 +80,16 @@ def test_load_commit_parses_parents_of_a_non_root_commit(repo: Path, second_comm
     assert commit.parents[0] == git.resolve_sha(repo, "HEAD~1")
 
 
-def test_load_commit_parses_a_merge_commit(repo: Path, second_commit: str) -> None:
-    run_git(repo, "checkout", "-q", "-b", "side", "HEAD~1")
+def test_load_commit_parses_a_merge_commit(repo: Path, second_commit: str, git_run) -> None:
+    git_run(repo, "checkout", "-q", "-b", "side", "HEAD~1")
     (repo / "side.txt").write_text("side\n", encoding="utf-8")
-    run_git(repo, "add", "side.txt")
-    run_git(repo, "commit", "-q", "-m", "Side work")
-    run_git(repo, "checkout", "-q", "main")
+    git_run(repo, "add", "side.txt")
+    git_run(repo, "commit", "-q", "-m", "Side work")
+    git_run(repo, "checkout", "-q", "main")
     (repo / "main.txt").write_text("main\n", encoding="utf-8")
-    run_git(repo, "add", "main.txt")
-    run_git(repo, "commit", "-q", "-m", "Main work")
-    run_git(repo, "merge", "-q", "--no-ff", "-m", "Merge side", "side")
+    git_run(repo, "add", "main.txt")
+    git_run(repo, "commit", "-q", "-m", "Main work")
+    git_run(repo, "merge", "-q", "--no-ff", "-m", "Merge side", "side")
 
     merge = git.load_commit(repo, "HEAD")
     assert len(merge.parents) == 2
@@ -127,9 +126,9 @@ def test_is_ancestor(repo: Path, second_commit: str) -> None:
     assert not git.is_ancestor(repo, second_commit, first)
 
 
-def test_git_error_preserves_stderr(tmp_path: Path) -> None:
+def test_git_error_preserves_stderr(tmp_path: Path, git_run) -> None:
     with pytest.raises(subprocess.CalledProcessError):
-        run_git(tmp_path, "not-a-command")
+        git_run(tmp_path, "not-a-command")
 
 
 def test_negative_diff_cap_disables_truncation(repo: Path) -> None:
@@ -138,11 +137,11 @@ def test_negative_diff_cap_disables_truncation(repo: Path) -> None:
     assert commit.diff
 
 
-def test_multiline_body_is_parsed_correctly(repo: Path) -> None:
+def test_multiline_body_is_parsed_correctly(repo: Path, git_run) -> None:
     """A body containing newlines and field-like text must not corrupt the record."""
     (repo / "multi.txt").write_text("hello\n", encoding="utf-8")
-    run_git(repo, "add", "multi.txt")
-    run_git(
+    git_run(repo, "add", "multi.txt")
+    git_run(
         repo,
         "commit",
         "-q",

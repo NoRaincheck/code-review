@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any
 
 PROTOCOL_VERSION = 1
@@ -110,6 +111,12 @@ class FakeAgent:
                     "cost": {"amount": 0.02, "currency": "USD"},
                 },
             )
+
+        if self.script.get("hang_after_chunks"):
+            # Streamed everything, then stopped responding. Reproduces an agent that
+            # overruns its budget, so the client's timeout and cancellation are testable.
+            time.sleep(float(self.script.get("hang_seconds", 120)))
+            return
 
         self.respond(
             request_id,
