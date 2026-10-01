@@ -40,6 +40,9 @@ client is given the worktree as its root, so what the agent may read is unchange
 from __future__ import annotations
 
 import contextlib
+import logging
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -49,10 +52,16 @@ from pathlib import Path
 from .git import clean_env
 
 #: Every worktree this module creates is named so it can be recognised later, including
-#: after a crash, by a reap that must not touch anything the user made.
+#: after a crash, by a reap that must not touch anything the user made. The owning process id
+#: is part of the name, which is what makes reaping safe across processes.
 PREFIX = "code-review-"
 
+#: ``<prefix><pid>-<random>``, so a leftover can be attributed to the process that made it.
+_OWNER = re.compile(rf"^{re.escape(PREFIX)}(?P<pid>\d+)-")
+
 DEFAULT_TIMEOUT = 120
+
+log = logging.getLogger(__name__)
 
 
 class WorktreeError(RuntimeError):
@@ -81,15 +90,21 @@ def _path_for_new_worktree() -> Path:
     The system temp directory is the honest choice: it is on the same filesystem in the common
     case, it is not inside the user's checkout, and it is not tracked by anything.
     """
-    return Path(tempfile.mkdtemp(prefix=PREFIX))
+    return Path(tempfile.mkdtemp(prefix=f"{PREFIX}{os.getpid()}-"))
 
 
 def create(repo: Path, sha: str) -> Path:
     """Create a detached worktree at *sha* and return its path.
 
+    Leftovers are cleared first, here rather than in a caller, because this is the one point
+    every worktree passes through. A reap in the daemon worker alone would miss ``review
+    --inline``, which never involves the daemon, and that is a path users take by hand often
+    enough to leak on.
+
     The caller owns cleanup; use :func:`isolated` unless you specifically need to hold it open
     across several operations.
     """
+    _reap_quietly(repo)
     path = _path_for_new_worktree()
     try:
         _run(repo, ["worktree", "add", "--detach", "--quiet", str(path), sha])
@@ -117,6 +132,19 @@ def _discard(repo: Path, path: Path) -> None:
     with contextlib.suppress(WorktreeError):
         _run(repo, ["worktree", "prune"])
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _reap_quietly(repo: Path) -> None:
+    """Reap leftovers, treating failure as housekeeping rather than as a reason to stop.
+
+    A repository too mangled for ``git worktree list`` should still be reviewable, so a problem
+    here is reported and stepped over instead of raised.
+    """
+    try:
+        for path in reap_stale(repo):
+            log.warning("removed a leftover review worktree from an interrupted review: %s", path)
+    except (WorktreeError, OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not check for leftover review worktrees in %s: %s", repo, exc)
 
 
 @contextlib.contextmanager
@@ -147,7 +175,7 @@ def reap_stale(repo: Path) -> list[Path]:
         if prefix != "worktree" or not value:
             continue
         path = Path(value)
-        if not is_ours(path):
+        if not is_ours(path) or not owner_is_gone(path):
             continue
         _discard(repo, path)
         removed.append(path)
@@ -157,3 +185,29 @@ def reap_stale(repo: Path) -> list[Path]:
 def is_ours(path: Path) -> bool:
     """Whether *path* looks like a worktree this module created."""
     return path.name.startswith(PREFIX)
+
+
+def owner_is_gone(path: Path) -> bool:
+    """Whether the process that created *path* is no longer running.
+
+    This is what makes reaping safe to do from a second process. An inline ``review`` and the
+    daemon can run at the same time against the same repository, and a reap that ignored liveness
+    would delete the worktree a review was actively using. Attributing each worktree to a pid
+    and only reaping the dead ones removes that hazard.
+
+    A reused pid makes this conservative in the safe direction: a stale worktree is left alone
+    until that process exits, rather than being removed out from under a live review.
+    """
+    match = _OWNER.match(path.name)
+    if match is None:
+        return False
+    pid = int(match.group("pid"))
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False

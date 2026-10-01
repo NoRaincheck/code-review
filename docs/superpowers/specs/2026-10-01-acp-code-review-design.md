@@ -545,8 +545,23 @@ each verified against real git rather than assumed:
   the registration behind, and cleanup runs in a ``finally``, so a review that times out,
   crashes or is cancelled is cleaned up too.
 
-An explicit reap exists for the crash case, and it will only ever remove a worktree whose name
-carries this tool's prefix, so a worktree the user made by hand can never be a candidate.
+A leftover is therefore possible, when a review is killed rather than finishing: a SIGKILL, a
+crash, or a machine that goes away mid-review. An explicit reap clears those, and it is
+deliberately built to be safe to run at any moment, because that is what makes it worth having:
+
+* It runs in ``create``, the one point every worktree passes through, not in the daemon worker.
+  A reap in the worker alone would miss ``review --inline``, which never involves the daemon and
+  is a path people take by hand often enough to leak on.
+* It only considers names carrying this tool's prefix, so a worktree the user made by hand is
+  never a candidate.
+* It only removes worktrees whose owning process is **gone**. This is the part that is easy to
+  get wrong. An inline review and the daemon can run at the same time against one repository, and
+  a reap that ignored liveness would delete the worktree a review was actively using, turning a
+  housekeeping step into a way to break a review in flight. Each worktree is therefore named with
+  the pid that created it. Pid reuse makes the check conservative in the safe direction: a stale
+  worktree is left until that process exits, rather than removed out from under a live review.
+* It never fails a review. A repository too mangled for ``git worktree list`` is logged and
+  stepped over, since housekeeping is not worth blocking a review for.
 
 **Verified against a real agent, not just the fake one.** Reviewing a commit whose ``div`` had
 no zero guard while the working tree held a later guarded version, the agent quoted

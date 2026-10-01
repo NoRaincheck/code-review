@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -71,6 +72,29 @@ def _wait_for_status(repo: Path, sha: str, timeout: float = 60.0) -> object:
         raise AssertionError(f"review of {sha[:7]} never finished")
     finally:
         database.close()
+
+
+def _dead_pid() -> int:
+    """A pid that is no longer running, so liveness gating treats its worktree as a leak.
+
+    Reaping deliberately skips worktrees owned by a live process, so a test cannot make a leak
+    with the pid it already has. Spawning a trivial process and waiting for it yields a pid
+    that has exited; the residue of pid reuse is a risk this test accepts knowingly.
+    """
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    return finished.pid
+
+
+def _leaked(repo: Path, sha: str) -> Path:
+    """A registered worktree left behind by a process that is gone, as a crash would leave."""
+    path = Path(tempfile.mkdtemp()) / f"{worktree.PREFIX}{_dead_pid()}-stale"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", "--quiet", str(path), sha],
+        cwd=repo,
+        check=True,
+    )
+    return path
 
 
 def _review(repo: Path, sha: str) -> str:
@@ -215,13 +239,48 @@ def test_reap_leaves_a_users_own_worktree_alone(repo: Path, tmp_path: Path) -> N
     assert worktree.is_ours(mine) is False
 
 
-def test_reap_removes_our_own_leftovers(repo: Path, second_commit: str) -> None:
+def test_reap_removes_a_leftover_whose_owner_is_gone(repo: Path, second_commit: str) -> None:
     """The crash case: a worktree survives the process that made it."""
-    leaked = worktree.create(repo, second_commit)
+    leaked = _leaked(repo, second_commit)
     assert leaked.is_dir()
 
     assert [p.resolve() for p in worktree.reap_stale(repo)] == [leaked.resolve()]
     assert not leaked.exists()
+
+
+def test_reap_never_removes_a_worktree_a_live_review_is_using(
+    repo: Path, second_commit: str
+) -> None:
+    """The hazard that made the pid part of the name necessary.
+
+    An inline `review` and the daemon can run at the same time against one repository. A reap
+    that ignored liveness would delete the worktree a review is actively using, turning a
+    housekeeping step into a way to break a review that is in flight.
+    """
+    live = worktree.create(repo, second_commit)
+    try:
+        assert worktree.owner_is_gone(live) is False
+        assert worktree.reap_stale(repo) == [], "reaped a worktree this process is using"
+        assert live.is_dir(), "the reap destroyed a live worktree"
+    finally:
+        worktree.remove(repo, live)
+
+
+def test_a_reused_pid_keeps_a_leftover_rather_than_breaking_a_live_review(
+    repo: Path, second_commit: str
+) -> None:
+    """Conservative in the safe direction: a false "alive" costs a leftover, not a review."""
+    path = Path(tempfile.mkdtemp()) / f"{worktree.PREFIX}{os.getpid()}-stale"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", "--quiet", str(path), second_commit],
+        cwd=repo,
+        check=True,
+    )
+    try:
+        assert worktree.owner_is_gone(path) is False
+        assert worktree.reap_stale(repo) == []
+    finally:
+        worktree.remove(repo, path)
 
 
 def test_no_worktree_metadata_is_left_in_the_shared_git_dir(repo: Path, second_commit: str) -> None:
@@ -349,3 +408,114 @@ def test_doctor_reports_the_real_database_path(
     printed = capsys.readouterr().out
     reported = next(line for line in printed.splitlines() if line.startswith("database:"))
     assert Path(reported.split(maxsplit=1)[1]).is_file(), reported
+
+
+# -- the crash case, end to end -----------------------------------------------------
+
+
+def test_a_review_clears_worktrees_left_by_an_interrupted_one(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """The reap is only worth anything if a review actually performs it.
+
+    Simulates the crash by creating the worktree a review would have created and abandoning
+    it, the way a SIGKILL mid-review would. The next review must clear it.
+    """
+    leaked = _leaked(repo, second_commit)
+    assert leaked.is_dir()
+    assert (git.common_dir(repo) / "worktrees").is_dir(), "precondition: it is registered"
+
+    _script(repo, tmp_path)
+    _review(repo, second_commit)
+
+    assert not leaked.exists(), "the next review did not clean up the previous one's worktree"
+    assert not (git.common_dir(repo) / "worktrees").exists()
+
+
+def test_the_reap_does_not_stop_a_review_when_git_cannot_list_worktrees(
+    repo: Path, second_commit: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mangled repository should not block the next review; the reap is housekeeping."""
+
+    def refuse(*args: str, **kwargs: str) -> str:
+        raise git.GitError(["worktree", "list"], 128, "not a git repository")
+
+    monkeypatch.setattr(worktree, "reap_stale", refuse)
+    _script(repo, tmp_path)
+    markdown = _review(repo, second_commit)
+
+    assert "No issues found" in markdown or markdown.strip(), "review should still have run"
+
+
+def test_the_reap_only_ever_touches_our_own_prefix(repo: Path, second_commit: str) -> None:
+    """A user's worktree survives a reap, even while ours is cleared."""
+    mine = repo.parent / "user-worktree"
+    _run_git(repo, "worktree", "add", "-q", str(mine), "-b", "user")
+    leaked = _leaked(repo, second_commit)
+
+    removed = worktree.reap_stale(repo)
+
+    assert [p.resolve() for p in removed] == [leaked.resolve()]
+    assert mine.is_dir(), "the reap removed a worktree the user created"
+    assert (mine / ".git").is_file(), "precondition: the user's worktree is still intact"
+
+
+def test_a_reap_during_a_live_review_leaves_that_review_alone(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """The hazard, exercised the way it would actually happen.
+
+    A review is genuinely in flight, holding a registered worktree, and something reaps the
+    repository mid-review. If that review's worktree disappears, the agent is left reading a
+    directory that no longer exists and fails for a reason that has nothing to do with the
+    commit. The reap is meant to be safe to run at any time, so this is the case that matters.
+    """
+    import threading
+
+    # A long hang with a longer review budget, so the review is unambiguously still in flight
+    # for the whole window below rather than finishing underneath the assertions.
+    _script(repo, tmp_path, timeout=300, hang_seconds=180, hang_after_chunks=True)
+    outcome: dict[str, object] = {}
+
+    def review() -> None:
+        try:
+            outcome["markdown"] = _review(repo, second_commit)
+        except Exception as exc:  # recorded so the assertion below explains the real failure
+            outcome["error"] = exc
+
+    def in_flight() -> list[Path]:
+        return [
+            Path(line.split(" ", 1)[1])
+            for line in _run_git(repo, "worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ")
+        ]
+
+    def ours() -> list[Path]:
+        return [p for p in in_flight() if worktree.is_ours(p)]
+
+    thread = threading.Thread(target=review)
+    thread.start()
+    try:
+        # The review has to get as far as registering its worktree before there is anything to
+        # protect, so wait for that rather than assuming it has happened.
+        appeared = time.monotonic() + 30
+        while not ours() and time.monotonic() < appeared and thread.is_alive():
+            time.sleep(0.1)
+        assert ours(), f"review never registered a worktree; outcome={outcome!r}"
+        assert thread.is_alive(), f"review finished before it could be tested: {outcome!r}"
+
+        # Reap repeatedly over a fixed window and require the worktree to survive every pass.
+        # The window is bounded rather than "until the review ends" so the assertions cannot
+        # race the review's own legitimate teardown.
+        window = time.monotonic() + 5
+        while time.monotonic() < window:
+            live = ours()
+            assert live, "the review's worktree vanished while the review was running"
+            for path in live:
+                assert path.is_dir(), f"reap removed a worktree in use: {path}"
+            worktree.reap_stale(repo)
+            time.sleep(0.1)
+        assert ours(), "worktree did not survive repeated reaps"
+        assert thread.is_alive(), f"review ended early, so the window proved nothing: {outcome!r}"
+    finally:
+        thread.join(timeout=60)
