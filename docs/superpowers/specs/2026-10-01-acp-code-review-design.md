@@ -252,6 +252,23 @@ review_timeout_seconds = 300        # per-review wall clock
 deny_unknown_commands = true        # reject anything outside the git allowlist
 ```
 
+Every key in this section is covered twice: once for parsing, including rejection of
+malformed values, and once proving the value actually reaches where it is used. A key that
+parses but does not take effect looks fine in a unit test and breaks every review.
+
+| Key | Parsing | Proven to take effect |
+| --- | --- | --- |
+| `review_agent` | yes | the spawned process is that argv |
+| `review_agent_args` | yes | appended to the agent's argv |
+| `review_agent_env` | yes | present in the agent's environment |
+| `review_guidelines` | yes | present in the prompt |
+| `max_diff_bytes` | yes | the prompt the agent receives is truncated |
+| `review_timeout_seconds` | yes | the review is cancelled at that budget |
+| `deny_unknown_commands` | yes | flips a real permission decision |
+
+The effect tests assert against what the agent received, not against the config object,
+because the latter cannot fail for the reason that matters.
+
 ## 8. Permission policy
 
 `policy.py` is a pure function from a `ToolCallUpdate` to a decision. `runner.py` applies it.
@@ -392,7 +409,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-272 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+306 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
