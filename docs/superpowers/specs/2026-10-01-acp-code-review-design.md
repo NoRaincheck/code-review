@@ -269,6 +269,24 @@ parses but does not take effect looks fine in a unit test and breaks every revie
 The effect tests assert against what the agent received, not against the config object,
 because the latter cannot fail for the reason that matters.
 
+### The diff is untrusted input
+
+A diff is attacker-controlled text from the repository, embedded verbatim in a prompt. Two
+consequences are handled explicitly:
+
+**The code fence is sized to the content.** An unchanged file containing a code block puts a
+space-prefixed ` ``` ` line into the diff, and CommonMark accepts up to three spaces of
+indentation before a closing fence. So any README in the repository closed the diff fence
+early and let the rest of the diff escape into the prompt's own structure. The fence is now
+longer than the longest backtick run in the diff, which makes that impossible. Found by
+probing a real markdown commit rather than by reading the code.
+
+**Pathological commits are handled and checked.** An empty commit produces a zero-length diff
+and a valid prompt. A binary file yields git's own `Binary files ... differ` text rather than
+decoded bytes, because the patch is decoded with `errors="replace"`. Both were run through the
+real agent: the empty commit reviews cleanly, and the binary blob is reported as an
+unreferenced high-entropy file.
+
 ## 8. Permission policy
 
 `policy.py` is a pure function from a `ToolCallUpdate` to a decision. `runner.py` applies it.
@@ -409,7 +427,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-340 tests, 72% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+345 tests, 72% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
