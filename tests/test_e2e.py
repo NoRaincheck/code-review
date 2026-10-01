@@ -387,9 +387,30 @@ def test_failure_is_reported_not_hidden(tmp_path: Path, repo: Path, second_commi
     assert "not found" in result.stderr.lower()
 
 
-def test_state_dir_is_gitignored(scripted_repo: tuple[Path, str]) -> None:
+def test_init_leaves_the_working_tree_alone_on_a_fresh_install(
+    scripted_repo: tuple[Path, str],
+) -> None:
+    """Nothing is written into the checkout, so `.gitignore` is not edited either.
+
+    Worth pinning because it is a promise the README and `init` both make, and because the
+    natural implementation adds the entry unconditionally.
+    """
     repo, _sha = scripted_repo
-    run_cli("init", "--repo", str(repo))
+    result = run_cli("init", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "not needed" in result.stdout, result.stdout
+    assert not (repo / ".gitignore").exists()
+
+
+def test_init_ignores_a_leftover_state_directory(scripted_repo: tuple[Path, str]) -> None:
+    """The upgrader case: a stale `.codereview/` from an earlier version must stay ignored."""
+    repo, _sha = scripted_repo
+    state = paths.state_dir(repo)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "reviews.db").write_text("stale", encoding="utf-8")
+
+    result = run_cli("init", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
     assert ".codereview/" in (repo / ".gitignore").read_text(encoding="utf-8")
 
 
