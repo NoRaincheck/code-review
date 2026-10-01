@@ -8,6 +8,7 @@ covers every path ``runner.py`` takes.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -98,6 +99,40 @@ class FakeAgent:
                 {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": chunk},
+                },
+            )
+
+        # Lets a test prove environment from review_agent_env actually reached us.
+        echo = os.environ.get("CODE_REVIEW_TEST_ECHO")
+        if echo:
+            self.notify(
+                session_id,
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": f"echo={echo}"},
+                },
+            )
+
+        # And that extra argv from review_agent_args reached us.
+        if self.script.get("echo_argv"):
+            self.notify(
+                session_id,
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": f"argv={sys.argv[1:]}"},
+                },
+            )
+
+        # Reports what the prompt actually contained, so a test can prove config such as
+        # max_diff_bytes reached the prompt rather than merely parsing.
+        marker = self.script.get("echo_prompt_has")
+        if marker:
+            present = marker in text
+            self.notify(
+                session_id,
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": f"prompt_has[{marker}]={present}"},
                 },
             )
 

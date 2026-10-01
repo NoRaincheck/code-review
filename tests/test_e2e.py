@@ -312,3 +312,145 @@ def test_state_dir_is_gitignored(scripted_repo: tuple[Path, str]) -> None:
     repo, _sha = scripted_repo
     run_cli("init", "--repo", str(repo))
     assert ".codereview/" in (repo / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_review_agent_env_reaches_the_agent(repo: Path, second_commit: str, tmp_path: Path) -> None:
+    """review_agent_env must reach the spawned process, not merely parse."""
+    script = tmp_path / "echo.json"
+    script.write_text(json.dumps({"chunks": ["review done"]}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        'review_agent_env = { CODE_REVIEW_TEST_ECHO = "from-config" }\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "echo=from-config" in result.stdout
+
+
+def test_review_agent_args_reach_the_agent(repo: Path, second_commit: str, tmp_path: Path) -> None:
+    """review_agent_args must be appended to the agent's argv."""
+    script = tmp_path / "argv.json"
+    script.write_text(json.dumps({"chunks": ["review done"], "echo_argv": True}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        'review_agent_args = ["--extra-one", "two"]\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "--extra-one" in result.stdout, result.stdout
+
+
+def test_max_diff_bytes_reaches_the_prompt(repo: Path, tmp_path: Path) -> None:
+    """A small cap must truncate the diff the agent is actually asked to review."""
+    (repo / "big.py").write_text("\n".join(f"def f{i}(a, b):\n    return a - b" for i in range(60)))
+    subprocess.run(["git", "add", "big.py"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add many helpers"], cwd=repo, check=True, capture_output=True
+    )
+
+    script = tmp_path / "prompt.json"
+    script.write_text(
+        json.dumps({"chunks": ["ok"], "echo_prompt_has": "[code-review: diff truncated"})
+    )
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        "max_diff_bytes = 300\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli("review", "HEAD", "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "prompt_has[[code-review: diff truncated]=True" in result.stdout, result.stdout
+
+
+def test_a_generous_diff_cap_leaves_the_diff_intact(repo: Path, tmp_path: Path) -> None:
+    """The cap must not truncate when the diff already fits."""
+    script = tmp_path / "prompt2.json"
+    script.write_text(json.dumps({"chunks": ["ok"], "echo_prompt_has": "def add(a, b):"}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        "max_diff_bytes = 200000\n",
+        encoding="utf-8",
+    )
+    result = run_cli("review", "HEAD", "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "prompt_has[def add(a, b):]=True" in result.stdout, result.stdout
+
+
+def test_review_guidelines_reach_the_prompt(repo: Path, second_commit: str, tmp_path: Path) -> None:
+    """Project guidelines must appear in the prompt the agent receives."""
+    script = tmp_path / "guidelines.json"
+    script.write_text(json.dumps({"chunks": ["ok"], "echo_prompt_has": "WATCH FOR TYPOS"}))
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n"
+        'review_guidelines = """\nWATCH FOR TYPOS in identifiers.\n"""\n',
+        encoding="utf-8",
+    )
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "prompt_has[WATCH FOR TYPOS]=True" in result.stdout, result.stdout
+
+
+def _scripted_repo_with_non_readonly_git(repo: Path, tmp_path: Path) -> None:
+    """Config an agent that asks to run `git fetch`, which is not read-only."""
+    script = tmp_path / "fetch.json"
+    script.write_text(
+        json.dumps(
+            {
+                "tools": [
+                    {
+                        "id": "c1",
+                        "kind": "execute",
+                        "title": "git fetch",
+                        "raw_input": {"command": "git", "args": ["fetch"]},
+                        "request_permission": True,
+                    }
+                ],
+                "chunks": ["ok"],
+            }
+        )
+    )
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n",
+        encoding="utf-8",
+    )
+
+
+def _decision_for(repo: Path, sha: str) -> str:
+    import sqlite3
+
+    conn = sqlite3.connect(repo / ".codereview" / "reviews.db")
+    try:
+        row = conn.execute("SELECT tool_log_json FROM reviews WHERE sha = ?", (sha,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row[0], "no tool log recorded"
+    return json.loads(row[0])[0]["decision"]
+
+
+def test_deny_unknown_commands_true_refuses_non_readonly_git(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """The documented default must actually reach the policy."""
+    _scripted_repo_with_non_readonly_git(repo, tmp_path)
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert _decision_for(repo, second_commit) == "deny"
+
+
+def test_deny_unknown_commands_false_permits_non_readonly_git(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """Opting out must reach the policy too, and must still refuse shell escapes."""
+    _scripted_repo_with_non_readonly_git(repo, tmp_path)
+    text = (repo / ".codereview.toml").read_text(encoding="utf-8")
+    (repo / ".codereview.toml").write_text(
+        text + "deny_unknown_commands = false\n", encoding="utf-8"
+    )
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert _decision_for(repo, second_commit) == "allow"
