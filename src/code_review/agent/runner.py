@@ -44,6 +44,7 @@ class ReviewOutcome:
     agent_version: str | None = None
     usage: dict[str, Any] | None = None
     tool_log: list[dict[str, Any]] = field(default_factory=list)
+    warning: str | None = None
 
     @property
     def is_complete(self) -> bool:
@@ -62,6 +63,38 @@ def _client_capabilities() -> ClientCapabilities:
         fs=FileSystemCapabilities(read_text_file=True, write_text_file=False),
         terminal=False,
     )
+
+
+#: Stands in for the throwaway worktree path in anything we persist.
+WORKTREE_PLACEHOLDER = "<worktree>"
+
+
+def _with_root_rewritten(tool_log: list[dict[str, Any]], root: Path) -> list[dict[str, Any]]:
+    """Replace the worktree's absolute path in tool titles with a stable placeholder.
+
+    The agent is given the worktree, so every command it runs mentions a temporary directory
+    whose name carries our pid and changes every run. Stored verbatim that is noise in a log
+    nobody can act on. Rewriting it keeps the log useful and comparable between reviews, and
+    avoids persisting a path from a directory that no longer exists.
+
+    Rewrites the title only, which is the human-readable part. Anything else in the log is
+    passed through untouched rather than pattern-matched, so a change in the agent's payload
+    shape cannot quietly lose data.
+    """
+    resolved = str(root.resolve())
+    raw = str(root)
+    rewritten = []
+    for entry in tool_log:
+        title = entry.get("title")
+        if not isinstance(title, str):
+            rewritten.append(entry)
+            continue
+        updated = dict(entry)
+        updated["title"] = title.replace(resolved, WORKTREE_PLACEHOLDER).replace(
+            raw, WORKTREE_PLACEHOLDER
+        )
+        rewritten.append(updated)
+    return rewritten
 
 
 def _build_env(agent: AgentConfig) -> dict[str, str]:
@@ -170,7 +203,8 @@ class ReviewRunner:
                 stop_reason=stop_reason,
                 agent=agent.label,
                 usage=usage,
-                tool_log=client.tool_log(),
+                tool_log=_with_root_rewritten(client.tool_log(), root),
+                warning=prompt_builder.missing_verdict(markdown),
             )
 
         return self._outcome

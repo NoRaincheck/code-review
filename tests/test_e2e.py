@@ -535,3 +535,69 @@ def test_deny_unknown_commands_false_permits_non_readonly_git(
     result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
     assert result.returncode == 0, result.stderr
     assert _decision_for(repo, second_commit) == "allow"
+
+
+def test_a_review_that_never_reviewed_is_warned_about_not_reported_as_clean(
+    scripted_repo: tuple[Path, str], tmp_path: Path
+) -> None:
+    """The defect this was found by: a real agent narrated its approach, ended the turn, and
+    the notes were stored as a successful review with no indication anything was wrong."""
+    repo, _ = scripted_repo
+    narration = Path(tempfile.mkdtemp(prefix="crn")) / "agent.json"
+    narration.write_text(
+        json.dumps(
+            {
+                "chunks": [
+                    "I'll start by examining the repository to understand the context.",
+                    "",
+                    "Let me read the full current state of the key files.",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(narration)!r}]\n"
+        "review_timeout_seconds = 60\n",
+        encoding="utf-8",
+    )
+
+    sha = git.resolve_sha(repo, "HEAD")
+    result = run_cli("review", sha, "--inline", "--repo", str(repo))
+    assert result.returncode == 0, result.stderr
+    assert "warning" in result.stderr, result.stderr
+
+    review = wait_for_status(repo, sha)
+    assert review.status is Status.COMPLETED
+    assert review.error is None, "the review did complete; this is not a failure"
+    assert review.warning is not None, "the stored review carries no warning"
+    assert "verdict" in review.warning
+    assert "I'll start by examining" in (review.markdown or ""), "the work is not thrown away"
+
+    shown = run_cli("show", sha, "--repo", str(repo))
+    assert "warning" in shown.stderr, shown.stderr
+
+
+def test_a_real_review_carries_no_warning(scripted_repo: tuple[Path, str]) -> None:
+    """The normal path must stay silent, or the warning is noise and gets ignored."""
+    repo, _ = scripted_repo
+    sha = git.resolve_sha(repo, "HEAD")
+    assert run_cli("review", sha, "--inline", "--repo", str(repo)).returncode == 0
+    review = wait_for_status(repo, sha)
+    assert review.status is Status.COMPLETED
+    assert review.warning is None
+
+
+def test_the_stored_tool_log_has_no_temporary_path(scripted_repo: tuple[Path, str]) -> None:
+    """Every command the agent ran named a directory that no longer exists."""
+    repo, _ = scripted_repo
+    hook.install(repo)
+    (repo / "later.py").write_text("def later():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "later.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "Add later()"], cwd=repo, check=True)
+
+    sha = git.resolve_sha(repo, "HEAD")
+    review = wait_for_status(repo, sha)
+    assert review.status is Status.COMPLETED, review.error
+    blob = json.dumps(review.tool_log)
+    assert "code-review-" not in blob, f"the worktree path was persisted: {blob[:400]}"

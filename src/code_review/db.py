@@ -9,6 +9,7 @@ there is no separate jobs table and a daemon restart resumes from the database.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import weakref
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     status        TEXT    NOT NULL,
     markdown      TEXT,
     error         TEXT,
+    warning       TEXT,
     stop_reason   TEXT,
     agent         TEXT,
     agent_version TEXT,
@@ -49,7 +51,10 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+
+#: Applied on every open, in order, each one a no-op once it has been applied.
+MIGRATIONS = ("ALTER TABLE reviews ADD COLUMN warning TEXT",)
 
 
 class Status(StrEnum):
@@ -73,6 +78,7 @@ class Review:
     status: Status
     markdown: str | None
     error: str | None
+    warning: str | None
     stop_reason: str | None
     agent: str | None
     agent_version: str | None
@@ -105,6 +111,7 @@ def _row_to_review(row: sqlite3.Row) -> Review:
         status=Status(row["status"]),
         markdown=row["markdown"],
         error=row["error"],
+        warning=row["warning"],
         stop_reason=row["stop_reason"],
         agent=row["agent"],
         agent_version=row["agent_version"],
@@ -150,8 +157,20 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
+        self._migrate()
 
         self._record_schema_version()
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to the current schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op for a table that is already there, so a
+        column added in a later version has to be added explicitly. Each step is idempotent
+        and ignores "already exists", so this is safe to run on every open.
+        """
+        for statement in MIGRATIONS:
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(statement)
 
     def _has_table(self, name: str) -> bool:
         row = self._conn.execute(
@@ -287,17 +306,24 @@ class Database:
         agent_version: str | None = None,
         usage: dict[str, Any] | None = None,
         tool_log: list[dict[str, Any]] | None = None,
+        warning: str | None = None,
     ) -> None:
         """Record a finished review.
 
         Partial output is still stored. A turn that stopped at ``max_tokens`` or
         ``refusal`` produced a truncated review, and the stop reason records that so the
         text is never presented as complete.
+
+        *warning* is for output that finished on time and looks like a review, but failed the
+        output contract. It is kept separate from *error* because the review did complete:
+        discarding the markdown would throw away real work, and calling it a success without
+        qualification would present the agent's scratch notes as a verdict.
         """
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE reviews SET status=?, markdown=?, stop_reason=?, agent=?, "
-                "agent_version=?, usage_json=?, tool_log_json=?, error=NULL, finished_at=? "
+                "agent_version=?, usage_json=?, tool_log_json=?, error=NULL, warning=?, "
+                "finished_at=? "
                 "WHERE id=?",
                 (
                     Status.COMPLETED.value,
@@ -307,6 +333,7 @@ class Database:
                     agent_version,
                     json.dumps(usage) if usage else None,
                     json.dumps(tool_log) if tool_log else None,
+                    warning,
                     _now(),
                     review_id,
                 ),

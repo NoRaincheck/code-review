@@ -88,13 +88,14 @@ def _dead_pid() -> int:
 
 def _leaked(repo: Path, sha: str) -> Path:
     """A registered worktree left behind by a process that is gone, as a crash would leave."""
-    path = Path(tempfile.mkdtemp()) / f"{worktree.PREFIX}{_dead_pid()}-stale"
+    dead = _dead_pid()
+    path = Path(tempfile.mkdtemp()) / f"{worktree.PREFIX}{dead}-stale"
     subprocess.run(
         ["git", "worktree", "add", "--detach", "--quiet", str(path), sha],
         cwd=repo,
         check=True,
     )
-    (path / worktree.MARKER).write_text(f"{_dead_pid()}\n", encoding="utf-8")
+    (path / worktree.MARKER).write_text(f"{dead}\n", encoding="utf-8")
     return path
 
 
@@ -641,7 +642,7 @@ def test_a_path_with_no_pid_in_its_name_is_not_considered_abandoned(
     _run_git(repo, "worktree", "add", "-q", str(mine), "-b", "plain")
     try:
         assert worktree.is_ours(mine) is False
-        assert worktree.owner_is_gone(mine) is False
+        assert worktree.owner_pid(mine) is None
     finally:
         _run_git(repo, "worktree", "remove", "--force", str(mine))
 
@@ -664,7 +665,7 @@ def test_a_user_worktree_named_exactly_like_ours_is_never_reaped(
     )
     try:
         assert worktree.is_ours(decoy), "precondition: the name is indistinguishable from ours"
-        assert worktree.owner_is_gone(decoy) is True, "precondition: the pid is dead"
+        assert worktree.owner_pid(decoy) is None, "precondition: it carries no marker"
 
         assert worktree.reap_stale(repo) == [], "reaped a worktree the user created"
         assert decoy.is_dir(), "the user's worktree was deleted"
@@ -673,15 +674,40 @@ def test_a_user_worktree_named_exactly_like_ours_is_never_reaped(
         _run_git(repo, "worktree", "remove", "--force", str(decoy))
 
 
-def test_our_own_worktree_carries_the_marker(repo: Path, second_commit: str) -> None:
-    """Ownership is proven by the marker, and the marker records the owning pid."""
+def test_the_marker_records_the_owning_pid_and_is_what_proves_ownership(
+    repo: Path, second_commit: str
+) -> None:
+    """One source of truth for both questions, so neither falls back to the directory name."""
     path = worktree.create(repo, second_commit)
     try:
-        marker = path / worktree.MARKER
-        assert marker.is_file()
-        assert marker.read_text(encoding="utf-8").strip() == str(os.getpid())
+        assert (path / worktree.MARKER).read_text(encoding="utf-8").strip() == str(os.getpid())
+        assert worktree.owner_pid(path) == os.getpid()
+
+        # Even with a name that gives nothing away, the marker still identifies the owner.
+        anonymous = repo.parent / "code-review-99999999-x"
+        anonymous.mkdir()
+        (anonymous / worktree.MARKER).write_text(f"{os.getpid()}\n", encoding="utf-8")
+        assert worktree.is_ours(anonymous) is True
+        assert worktree.owner_pid(anonymous) == os.getpid()
+        assert worktree.owner_is_gone(anonymous) is False
     finally:
         worktree.remove(repo, path)
+
+
+def test_a_corrupt_marker_is_treated_as_not_ours(repo: Path, second_commit: str) -> None:
+    """Unparseable is not the same as "probably fine".
+
+    A marker we cannot read is a marker we cannot trust, and the safe reading of that is that
+    the worktree is not provably ours.
+    """
+    leaked = _leaked(repo, second_commit)
+    (leaked / worktree.MARKER).write_text("not a pid\n", encoding="utf-8")
+    try:
+        assert worktree.owner_pid(leaked) is None
+        assert worktree.owner_is_gone(leaked) is False
+        assert worktree.reap_stale(repo) == [], "reaped a worktree it could not read"
+    finally:
+        worktree.remove(repo, leaked)
 
 
 def test_a_worktree_that_lost_its_marker_is_left_alone(repo: Path, second_commit: str) -> None:

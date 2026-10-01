@@ -106,6 +106,63 @@ def _commit_section(commit: Commit, fence: str) -> str:
     return "\n".join(lines)
 
 
+#: What a finished review is required to open with, as asked for in the output contract.
+#: Checked rather than assumed, because an agent can end its turn having produced only the
+#: narration of its own approach, and that is not a review however confidently it is stored.
+#: How many opening lines are considered before giving up on finding a verdict. Small on
+#: purpose: enough to allow a one-line courtesy preamble, not enough to read a whole essay.
+OPENING_LINES = 4
+
+VERDICT = re.compile(
+    r"^\s*(?:no issues found|no problems found|\d+\s+issues?(?:\s*\([^)]*\))?\s+found)\b",
+    re.IGNORECASE,
+)
+
+
+def missing_verdict(markdown: str) -> str | None:
+    """A warning describing *markdown* if it is not a review, else None.
+
+    Real observation, not a hypothetical: reviewing a large diff with a real agent, the agent
+    spent its turn on sixteen exploratory tool calls, narrated what it was about to do, and
+    ended the turn. ``stop_reason`` was ``end_turn``, so nothing looked wrong, and the notes
+    were stored as a successful review. A user reading that would believe they had been given
+    an assessment.
+
+    A warning rather than a failure, on purpose. The turn did complete and the output is real
+    work, so discarding it would be its own kind of loss, and calling it a clean success
+    presents scratch notes as a verdict. Neither error nor silence is defensible here.
+
+    The check is deliberately about the *opening line*, since that is the part of the contract
+    an agent almost always either meets or misses outright. Prose further down is not second
+    guessed, because a review that buries a correct verdict under an preamble is still a
+    review, and second-guessing wording is how you start discarding good output.
+
+    The check covers the *opening* of the answer, not all of it, and for two reasons. An agent
+    that clears its throat before answering has still reviewed, and flagging that would be
+    false positives on good output. And the narration this exists to catch is narration
+    throughout: in the observed case three consecutive lines of "I'll start by...", "Let me
+    read..." and "Let me probe...", with no verdict anywhere and no findings. Scanning a few
+    opening lines tolerates the first case and still catches the second.
+
+    Only whole lines are matched. A verdict mentioned mid-sentence is not the contract being
+    satisfied, and matching anywhere within a line would let narration talk its way past the
+    check.
+    """
+    considered = 0
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if VERDICT.match(stripped):
+            return None
+        considered += 1
+        if considered >= OPENING_LINES:
+            break
+    if not considered:
+        return "the agent produced no text"
+    return "the agent did not open with a verdict, so this may be its notes rather than a review"
+
+
 def build_prompt(commit: Commit, guidelines: str = "") -> str:
     """Assemble the full review prompt for *commit*.
 
