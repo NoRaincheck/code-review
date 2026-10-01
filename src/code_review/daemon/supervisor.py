@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from .. import paths
+from ..git import clean_env
 
 START_TIMEOUT = 15.0
 POLL_INTERVAL = 0.05
@@ -183,7 +184,12 @@ def spawn_detached(timeout: float = START_TIMEOUT) -> int:
 
 
 def _daemon_env() -> dict[str, str]:
-    env = dict(os.environ)
+    # The daemon is usually started by the post-commit hook, so it inherits git's hook
+    # environment, which points at the repository and index of the commit that just happened.
+    # Those are relative paths and they go stale the moment the daemon touches a different
+    # repository, so they are stripped here. Every git command also sanitises independently,
+    # because a daemon can be started from an ordinary shell too.
+    env = clean_env()
     env.setdefault("CODEREVIEW_HOME", str(paths.home_dir()))
     # Unbuffered so the log is useful while the daemon is still starting up.
     env["PYTHONUNBUFFERED"] = "1"

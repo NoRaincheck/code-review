@@ -18,9 +18,11 @@ uv sync                  # from a checkout
 code-review init         # in the repository you want reviewed
 ```
 
-`init` installs a `post-commit` hook, creates `.codereview/`, and adds that directory to
-`.gitignore`. It refuses to overwrite a `post-commit` hook it did not write unless you pass
-`--force`.
+`init` installs a `post-commit` hook and creates the review database. It refuses to overwrite a
+`post-commit` hook it did not write unless you pass `--force`. All state lives under the
+repository's shared git directory, not in your working tree, so there is nothing to commit. A
+`.gitignore` entry for `.codereview/` is still added, purely so a directory left behind by an
+older version stays ignored.
 
 ## Configure an agent
 
@@ -107,10 +109,11 @@ post-commit ──▶ enqueue ──▶ ~/.codereview/daemon.sock ──▶ INSE
                                                                   policy ──┤  denies writes and
                                                                            │  non-read-only commands
                                                                            ▼
-                                                            .codereview/reviews.db
+                                              <git common dir>/codereview/reviews.db
 ```
 
-Reviews live in `<repo>/.codereview/reviews.db`, one SQLite file per repository, gitignored.
+Reviews live in `<git common dir>/codereview/reviews.db`, one SQLite file per repository,
+shared by all its worktrees and kept out of your working tree.
 The `reviews` table doubles as the queue: `status='queued'` rows are pending work, so a
 daemon restart resumes from the database and a review interrupted by a crash is re-queued
 rather than lost.
@@ -168,9 +171,17 @@ The hook path is resolved by git, so `code-review init` works from any worktree 
 into the repository's shared hooks directory — one hook covers every worktree, which is what
 git expects.
 
-The review database is per-worktree, since `.codereview/` lives inside each one. `show` in
-one worktree will not see reviews produced in another, and the same commit can be reviewed
-once per worktree.
+The review database is per-*repository*, resolved through `git rev-parse --git-common-dir`, so
+`show` and `list` see the same history from every worktree and a commit is reviewed once no
+matter which worktree you are standing in.
+
+Reviews themselves run in a throwaway git worktree at the reviewed commit, not in your
+checkout. That means the agent reads the code the review is about even when your working tree
+has moved on, and anything it stages is discarded with that worktree. Two consequences worth
+knowing: a review writes a short-lived registration under `.git/worktrees/` (removed
+immediately afterwards, and it creates no branch or ref), and the temporary worktree lives in
+the system temp directory, so a machine with a small `/tmp` and many reviews may need
+`TMPDIR` pointed somewhere roomier.
 
 ## Safety
 

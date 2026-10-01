@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import git, paths
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -180,7 +180,8 @@ class Database:
 
     @classmethod
     def for_repo(cls, repo: Path) -> Database:
-        return cls(paths.db_path(repo))
+        """Open the database for *repo*, shared by every worktree of that repository."""
+        return cls(paths.db_path(git.common_dir(repo)))
 
     def close(self) -> None:
         """Close the connection. Safe to call twice, and on a failed construction."""

@@ -502,7 +502,9 @@ def _scripted_repo_with_non_readonly_git(repo: Path, tmp_path: Path) -> None:
 def _decision_for(repo: Path, sha: str) -> str:
     import sqlite3
 
-    conn = sqlite3.connect(repo / ".codereview" / "reviews.db")
+    # Deliberately resolved through the same helper the product uses, so this test follows the
+    # database if it ever moves again rather than pinning a path that can only go stale.
+    conn = sqlite3.connect(Database.for_repo(repo).path)
     try:
         row = conn.execute("SELECT tool_log_json FROM reviews WHERE sha = ?", (sha,)).fetchone()
     finally:

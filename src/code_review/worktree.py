@@ -1,0 +1,159 @@
+"""A throwaway git worktree, so a review cannot disturb the reviewer's checkout.
+
+Why this exists
+---------------
+A reviewing agent runs arbitrary read and shell tools. Two things follow from that when it
+runs in the user's own checkout:
+
+* **It reads the wrong code.** The agent resolves files from the working tree, while the
+  review is about a specific commit. Those disagree whenever the tree has moved past that
+  commit, whether because the review is retroactive, because it runs in a different worktree
+  of the repository, or because the tree was simply dirty.
+* **It writes.** Agents that snapshot their work run ``git add --all``, which stages
+  untracked files in the user's index. One agent was observed leaving index entries pointing
+  at blobs that were never written, leaving the repository unable to commit.
+
+Running the review in a worktree checked out at the reviewed commit fixes both. The trade is
+a write to the shared git directory, so it is stated plainly here rather than buried: git
+registers a worktree under ``<common>/worktrees/`` for the lifetime of the review.
+
+What that write does and does not touch, all verified against real git:
+
+* No ref is created. ``--detach`` points the worktree's HEAD straight at the commit, so
+  ``refs/`` is unchanged. ``git worktree add --detach`` is the whole reason this is cheap.
+* The worktree has its own index, so an agent staging files there cannot touch the user's.
+  Verified: a user with their own staged file keeps it, byte for byte, across a review.
+* Cleanup is ``git worktree remove`` followed by ``git worktree prune``, which leaves neither
+  the directory nor the registration behind.
+
+The user's checkout is therefore never the agent's working directory, and the only residue of
+a review is a metadata entry that exists for exactly as long as the review does.
+
+Isolation is not a sandbox
+--------------------------
+This confines *accidents*, not malice. The worktree shares the repository's object store and
+config, and an agent that works hard enough can still reach outside it. Confinement of
+untrusted commands is the permission policy's job, and this does not weaken it: the policy
+client is given the worktree as its root, so what the agent may read is unchanged in kind.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+
+from .git import clean_env
+
+#: Every worktree this module creates is named so it can be recognised later, including
+#: after a crash, by a reap that must not touch anything the user made.
+PREFIX = "code-review-"
+
+DEFAULT_TIMEOUT = 120
+
+
+class WorktreeError(RuntimeError):
+    """A throwaway worktree could not be created or removed."""
+
+
+def _run(repo: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env=clean_env(),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        raise WorktreeError(f"git {' '.join(args[:2])} failed: {detail}")
+    return result.stdout
+
+
+def _path_for_new_worktree() -> Path:
+    """A path outside the repository, since a worktree nested in one is confusing to git.
+
+    The system temp directory is the honest choice: it is on the same filesystem in the common
+    case, it is not inside the user's checkout, and it is not tracked by anything.
+    """
+    return Path(tempfile.mkdtemp(prefix=PREFIX))
+
+
+def create(repo: Path, sha: str) -> Path:
+    """Create a detached worktree at *sha* and return its path.
+
+    The caller owns cleanup; use :func:`isolated` unless you specifically need to hold it open
+    across several operations.
+    """
+    path = _path_for_new_worktree()
+    try:
+        _run(repo, ["worktree", "add", "--detach", "--quiet", str(path), sha])
+    except WorktreeError:
+        # git may have registered a partial worktree before failing; do not leave it behind.
+        _discard(repo, path)
+        raise
+    return path
+
+
+def remove(repo: Path, path: Path) -> None:
+    """Remove *path* and its registration, tolerating whatever the agent left inside.
+
+    Removal is forced because the agent may have written files, and a review that is being
+    torn down is not a review whose contents still matter. Prune afterwards clears any
+    registration whose directory has already gone, which is the normal case once the agent
+    has deleted things.
+    """
+    _discard(repo, path)
+
+
+def _discard(repo: Path, path: Path) -> None:
+    with contextlib.suppress(WorktreeError):
+        _run(repo, ["worktree", "remove", "--force", str(path)])
+    with contextlib.suppress(WorktreeError):
+        _run(repo, ["worktree", "prune"])
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def isolated(repo: Path, sha: str) -> Iterator[Path]:
+    """Yield a throwaway worktree at *sha*, removing it however the block exits.
+
+    A review that times out, crashes, or is cancelled still gets its worktree removed, since
+    cleanup happens in ``finally`` and does not depend on the review succeeding.
+    """
+    path = create(repo, sha)
+    try:
+        yield path
+    finally:
+        _discard(repo, path)
+
+
+def reap_stale(repo: Path) -> list[Path]:
+    """Remove leftover worktrees from a previous run that died without cleaning up.
+
+    Only ever removes worktrees whose name carries :data:`PREFIX`, so a worktree the user
+    created by hand is never a candidate, however broken the review that left it behind.
+    """
+    removed: list[Path] = []
+    listing = _run(repo, ["worktree", "list", "--porcelain"])
+    # Porcelain output is one block per worktree, each starting with "worktree <path>".
+    for line in listing.splitlines():
+        prefix, _, value = line.strip().partition(" ")
+        if prefix != "worktree" or not value:
+            continue
+        path = Path(value)
+        if not is_ours(path):
+            continue
+        _discard(repo, path)
+        removed.append(path)
+    return removed
+
+
+def is_ours(path: Path) -> bool:
+    """Whether *path* looks like a worktree this module created."""
+    return path.name.startswith(PREFIX)

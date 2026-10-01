@@ -508,59 +508,101 @@ review_agent = [
 This is the only reliable containment for a hostile repository, and it is what should be
 used when reviews run over contributions from people you do not trust.
 
-### Known limitation: the agent reads the working tree, not the reviewed commit
+### Review isolation: a throwaway worktree at the reviewed commit
 
-Structural, provable from the code alone. The agent is spawned with ``cwd`` set to the
-repository and ``session/new`` given the same path, so every file it reads comes from the
-working tree. The diff it reasons about comes from the prompt. Those two disagree whenever
-the working tree has moved past the reviewed commit:
+The agent is spawned with ``cwd`` set to the repository, so every file it read came from the
+working tree, while the diff it reasoned about came from the prompt. Those disagree whenever
+the tree has moved past the reviewed commit:
 
 ```
-HEAD          = 6980d8e   what the agent can read from disk
-reviewed sha  = a3048ef   what the diff describes
+HEAD          = 6980d8e   what the agent could read from disk
+reviewed sha  = a3048ef   what the diff described
 
 diff introduces      :  return a / b
 file on disk contains:  return a / b if b else 0
 ```
 
-So reviewing an old commit, or any commit after the tree has moved on, hands the agent a diff
-contradicted by the files around it. It may reason about code that is no longer there, or
-miss a defect that a later commit happens to have fixed.
+The primary flow was never affected: ``post-commit`` fires immediately after the commit, so
+working tree, HEAD and the reviewed sha are the same thing by construction. It bit in three
+cases, of which the second was the easiest to hit and the easiest to miss:
 
-**The main path is not affected.** `post-commit` fires immediately after the commit, so the
-working tree, HEAD and the reviewed sha are the same thing by construction. Verified. The
-mismatch only arises in three cases:
-
-1. a retroactive `code-review review <old-sha>`
+1. a retroactive ``code-review review <old-sha>``
 2. reviewing a sha from a worktree other than the one it was committed in
 3. a dirty tree at review time
 
-Case 2 is easy to hit and easy to miss: two worktrees of one repository have independent
-working trees, so reviewing a commit from the wrong one hands the agent files that contradict
-the diff. With per-worktree databases, a review can also be recorded in a worktree that never
-contained the commit.
+Reviews now run in a throwaway worktree checked out at the reviewed commit, and the agent's
+root is that worktree. This fixes the mismatch and confines staging damage in the same move.
 
-**How much this matters for those cases is unverified.** An attempt to measure it could not be
-completed: the agent backend degraded during the session, answering a bare "reply with PONG" in
-41 seconds and exceeding a 420-second budget twice. Every live measurement quoted elsewhere in
-this document was taken while the agent was fast and is unaffected, but this particular
-question remains open. Recorded as a known limitation rather than a measured defect, and scoped
-so it is not read as a defect in the primary flow.
+**The cost is a real write, and it was not hidden.** git registers a worktree under the shared
+``.git/worktrees/`` for the lifetime of the review. What that write does and does not touch,
+each verified against real git rather than assumed:
 
-The obvious fix is to run the review inside a throwaway worktree at the reviewed commit, which
-would also mean any staging damage landed in the worktree instead of the user's checkout. It
-is a real architectural change and was **not** made unilaterally, for two reasons worth
-recording:
+* No ref is created. ``--detach`` points the worktree's HEAD straight at the commit, so
+  ``refs/`` is unchanged. This is the entire reason the change is affordable.
+* The worktree has its own index, so an agent staging files there cannot touch the user's.
+  A user with their own staged file gets it back byte for byte across a review.
+* ``git worktree remove --force`` then ``git worktree prune`` leaves neither the directory nor
+  the registration behind, and cleanup runs in a ``finally``, so a review that times out,
+  crashes or is cancelled is cleaned up too.
 
-- It writes to the repository. `git worktree add` mutates the shared `.git` directory to
-  register the worktree. Trading an occasional corrupted index for a controlled, removable
-  metadata write is defensible, but it is a trade, not a pure win, and it deserves a decision
-  rather than a quiet commit.
-- Its quality benefit could not be measured while the agent was unreachable. The mechanical
-  properties are testable offline, but "does the agent review better this way" is not.
+An explicit reap exists for the crash case, and it will only ever remove a worktree whose name
+carries this tool's prefix, so a worktree the user made by hand can never be a candidate.
 
-Until that decision is made, the mitigation for the affected cases is to review from the
-worktree that contains the commit, and to keep the tree clean when reviewing an old sha.
+**Verified against a real agent, not just the fake one.** Reviewing a commit whose ``div`` had
+no zero guard while the working tree held a later guarded version, the agent quoted
+``return a / b`` and cited a docstring that exists *only* at the reviewed commit and was deleted
+by the fix. The cross-worktree case, previously the worst of the three, was checked the same
+way: the reviewed commit's ``average()`` had no empty-input guard, the worktree the review ran
+from had a hardened one, and the agent found the ``ZeroDivisionError`` and quoted the unguarded
+commit's docstring. Under the old behaviour it would have seen the guard and reported nothing.
+
+This is confinement of accidents, not a sandbox. The worktree shares the object's store and
+config, and a determined agent can still reach outside it. That was never the policy's job:
+the permission client is handed the worktree as its root, so what the agent may read is
+unchanged in kind, and a worktree is not a weaker jail than the checkout was.
+
+### Found while implementing worktree isolation: the daemon inherited git's hook environment
+
+git exports ``GIT_INDEX_FILE``, ``GIT_DIR`` and friends into a hook's environment, where they
+describe the repository and index of the commit being made. They are relative paths, correct
+only for the process git spawned. The post-commit hook starts the daemon, so the daemon
+inherited them for its entire life, and every git command it later ran in a different
+repository resolved its index against the wrong place.
+
+The read paths had been quietly tolerant of this for some time. ``git worktree add`` was the
+first command strict enough to object, failing with ``index file open failed: Not a directory``.
+The daemon's log showed the cause directly: ``GIT_INDEX_FILE=.git/index``.
+
+The uncomfortable part is what this implies about the repair command. ``code-review repair``
+runs ``git restore --staged``, which *writes* the index, and it inherited the same environment.
+Nothing had gone wrong yet, but a repair that unstaged a user's files against the wrong index
+would have been very hard to explain afterwards.
+
+Fixed at two levels. The supervisor no longer starts a daemon with those variables, so a daemon
+is never born poisoned, and every git call in the module sanitizes its environment
+independently, so a daemon started from an ordinary shell is covered too. The variables are
+listed by name rather than by a ``GIT_*`` wildcard, because a user is entitled to carry
+``GIT_SSH_COMMAND`` or ``GIT_CONFIG_GLOBAL`` into this tool and have it respected.
+
+Fixing it revealed a second problem, which is the more useful one. Adding ``env=clean_env()``
+to each call site by hand missed five of the seven, and two of the misses were the index
+writers described above. Hand-maintaining it does not work, so all git invocations now funnel
+through one of two helpers that own the environment. A test asserts no call site bypasses them,
+and a second test simulates the hook environment directly, which is why this cannot regress
+quietly again.
+
+### Reviews are stored per repository, not per worktree
+
+The database was one file per worktree, which was wrong in two ways. The same commit reviewed
+from two worktrees produced two independent reviews, and ``show`` in one worktree could not see
+what another had recorded. It sits at ``<common git dir>/codereview/reviews.db`` now, resolved
+through ``git rev-parse --git-common-dir``, so every worktree of a repository shares one
+history. A side benefit is that it is no longer written into the working tree at all, so there
+is nothing to gitignore.
+
+Concurrent writes were already safe and stay that way: WAL mode, ``BEGIN IMMEDIATE`` and a busy
+timeout serialize writers, and a unique constraint on the sha means two worktrees racing to
+review the same commit still produce one review.
 
 ### Observed: a reviewing agent can leave the repository uncommittable
 

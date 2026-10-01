@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 PROTOCOL_VERSION = 1
@@ -120,6 +121,23 @@ class FakeAgent:
                 {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type": "text", "text": f"argv={sys.argv[1:]}"},
+                },
+            )
+
+        # Reads a file the way a real agent would, relative to its own working directory,
+        # and reports the content. This is the only way to test *where* the agent was
+        # placed: a canned result cannot distinguish a checkout of the reviewed commit from
+        # the user's working tree, which is exactly the distinction under test.
+        for relative in self.script.get("read_files", []):
+            try:
+                content = (Path.cwd() / relative).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                content = f"<unreadable: {exc}>"
+            self.notify(
+                session_id,
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": f"read[{relative}]={content}"},
                 },
             )
 
