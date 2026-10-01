@@ -187,6 +187,8 @@ def cmd_review(args: argparse.Namespace) -> int:
         )
     except daemon_client.RequestFailed as exc:
         return _fail(str(exc))
+    except supervisor.UnsupportedPlatform as exc:
+        return _fail(str(exc))
     except (daemon_client.DaemonUnavailable, supervisor.DaemonAlreadyRunning) as exc:
         return _fail(f"could not reach the daemon: {exc}")
 
@@ -442,6 +444,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "start":
         try:
             pid = supervisor.ensure_running()
+        except supervisor.UnsupportedPlatform as exc:
+            return _fail(str(exc))
         except supervisor.DaemonAlreadyRunning as exc:
             return _fail(str(exc))
         print(f"daemon running (pid {pid})")
@@ -450,6 +454,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "stop":
         try:
             supervisor.stop_daemon()
+        except supervisor.UnsupportedPlatform as exc:
+            return _fail(str(exc))
         except supervisor.DaemonNotRunning as exc:
             return _fail(str(exc))
         print("daemon stopped")

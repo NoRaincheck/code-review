@@ -134,6 +134,16 @@ All keys optional in `.codereview.toml`:
 
 `CODEREVIEW_HOME` relocates the daemon socket, pid file, and logs from `~/.codereview`.
 
+## Platform support
+
+The background daemon requires POSIX: it uses Unix domain sockets, `fcntl` locks, and POSIX
+signals. That covers macOS and Linux.
+
+On Windows the daemon commands (`enqueue`, `daemon start/stop`) report that plainly instead
+of failing with a bare import error. The rest works: `show`, `list`, `doctor`, and
+`review --inline` all run without a daemon, so reviewing a single commit on Windows means
+using `--inline`.
+
 ## Git worktrees
 
 The hook path is resolved by git, so `code-review init` works from any worktree and installs

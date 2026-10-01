@@ -7,6 +7,13 @@ authors = [
     { name = "NoRaincheck", email = "2498638+NoRaincheck@users.noreply.github.com" }
 ]
 requires-python = ">=3.14"
+# The background daemon needs POSIX: Unix domain sockets, fcntl locks, POSIX signals.
+# `show`, `list`, `doctor` and `review --inline` work anywhere Python does.
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+]
 dependencies = [
     # Pinned exactly: 1.0.0rc2 already removed acp.helpers and expanded SessionUpdate
     # from 13 to 16 variants, so an unpinned install would break silently.

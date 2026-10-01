@@ -3,13 +3,17 @@
 The post-commit hook must never block, so it runs this: if the socket refuses a
 connection, start the daemon detached and retry. Two processes racing to start the
 daemon must not produce two daemons, so startup takes an exclusive lock file.
+
+Unix domain sockets, ``fcntl`` and POSIX signals are used throughout, so the daemon requires
+a POSIX platform. ``fcntl`` is therefore imported lazily and daemon operations raise a clear
+error elsewhere, rather than making read-only commands such as ``show`` and ``list``
+unimportable on Windows.
 """
 
 from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import os
 import signal
 import subprocess
@@ -21,6 +25,24 @@ from .. import paths
 
 START_TIMEOUT = 15.0
 POLL_INTERVAL = 0.05
+
+
+class UnsupportedPlatform(RuntimeError):
+    """The background daemon needs POSIX facilities this platform lacks."""
+
+
+def _fcntl() -> object:
+    """Import ``fcntl`` on demand, with an explanation when it is unavailable."""
+    try:
+        import fcntl
+    except ImportError as exc:  # pragma: no cover - POSIX-only path
+        raise UnsupportedPlatform(
+            "the background daemon needs a POSIX platform: it uses Unix domain "
+            "sockets, fcntl locks and POSIX signals. Read-only commands "
+            "(`show`, `list`, `doctor`) and `review --inline` still work. On Windows, "
+            "use --inline, or run the daemon under WSL."
+        ) from exc
+    return fcntl
 
 
 class DaemonAlreadyRunning(RuntimeError):
@@ -43,13 +65,15 @@ class _StartupLock:
         self._fd: int | None = None
 
     def __enter__(self) -> _StartupLock:
+        fcntl = _fcntl()
         self._fd = os.open(_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)  # type: ignore[attr-defined]
         return self
 
     def __exit__(self, *exc: object) -> None:
         if self._fd is not None:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            fcntl = _fcntl()
+            fcntl.flock(self._fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]
             os.close(self._fd)
             self._fd = None
 

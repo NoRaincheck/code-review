@@ -595,6 +595,59 @@ def test_stop_raises_when_no_daemon(isolated_home: Path) -> None:
         supervisor.stop_daemon()
 
 
+async def test_read_only_commands_work_without_fcntl(
+    repo: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI must import and read reviews on a platform without ``fcntl``.
+
+    The daemon genuinely needs POSIX, but a bare ``ModuleNotFoundError: No module named
+    'fcntl'`` at import time would take out ``show`` and ``list`` as well, telling a Windows
+    user nothing about what is actually unsupported.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "fcntl":
+            raise ModuleNotFoundError("No module named 'fcntl'")
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    from code_review.daemon.supervisor import UnsupportedPlatform
+
+    with pytest.raises(UnsupportedPlatform, match="POSIX"):
+        supervisor._fcntl()
+
+    # Importing the CLI must not itself need fcntl.
+    import code_review.cli as cli
+
+    assert cli is not None
+    assert hasattr(cli, "cmd_show")
+    assert hasattr(cli, "cmd_list")
+
+
+async def test_daemon_operations_report_the_platform_problem(
+    repo: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(supervisor, "_fcntl", _raise_unsupported)
+
+    from code_review.daemon.supervisor import UnsupportedPlatform
+
+    for call in (supervisor.ensure_running, supervisor.spawn_detached):
+        with pytest.raises(UnsupportedPlatform, match="--inline"):
+            call()
+
+
+def _raise_unsupported() -> object:
+    from code_review.daemon.supervisor import UnsupportedPlatform
+
+    raise UnsupportedPlatform(
+        "the background daemon needs a POSIX platform. Use `review --inline` instead."
+    )
+
+
 async def test_spawn_stop_leaves_no_running_child(
     repo: Path, isolated_home: Path, short_socket_dir: Path
 ) -> None:

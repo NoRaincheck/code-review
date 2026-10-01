@@ -448,9 +448,24 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-357 tests, 73% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+359 tests, 73% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
-## 13. Security model
+## 13. Platform support
+
+The daemon uses Unix domain sockets, `fcntl` locks, and POSIX signals, so it requires POSIX.
+macOS and Linux are covered; roborev ships a Windows installer and this does not.
+
+The failure mode was the real problem. `fcntl` was imported at module scope, so on Windows
+*every* command failed at import with a bare `ModuleNotFoundError: No module named 'fcntl'`,
+including `show` and `list`, which need none of it. A user would have had no way to tell that
+the daemon was the unsupported part rather than the whole tool.
+
+`fcntl` is now imported lazily behind a helper that raises `UnsupportedPlatform` with an
+explanation and the `--inline` workaround, the CLI catches it on the daemon paths only, and
+the read-only paths import cleanly. The platform requirement is declared in `pyproject.toml`
+and in the README rather than left to be discovered.
+
+## 14. Security model
 
 The review prompt embeds commit messages and diffs from the repository. A malicious diff
 containing instructions is a prompt-injection vector, so the agent runs with the permission
@@ -546,7 +561,7 @@ Two numbers are misleading rather than informative and are not worth chasing:
 - **`daemon/client.py` at 58%** is the same artifact, for the synchronous helpers the hook
   calls.
 
-## 14. Bugs the tests and smoke test caught
+## 15. Bugs the tests and smoke test caught
 
 Recorded because each is a trap that looks correct in review.
 
@@ -605,7 +620,7 @@ Recorded because each is a trap that looks correct in review.
    child as alive until it is waited on, so liveness checks reap first — otherwise every reap
    looks like a failure.
 
-## 15. Reference: ACP API used
+## 16. Reference: ACP API used
 
 Verified against `agent-client-protocol==0.12.1` by introspection.
 
