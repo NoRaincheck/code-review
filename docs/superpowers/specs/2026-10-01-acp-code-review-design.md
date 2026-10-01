@@ -508,6 +508,36 @@ review_agent = [
 This is the only reliable containment for a hostile repository, and it is what should be
 used when reviews run over contributions from people you do not trust.
 
+### Known limitation: the agent reads the working tree, not the reviewed commit
+
+Structural, provable from the code alone. The agent is spawned with ``cwd`` set to the
+repository and ``session/new`` given the same path, so every file it reads comes from the
+working tree. The diff it reasons about comes from the prompt. Those two disagree whenever
+the working tree has moved past the reviewed commit:
+
+```
+HEAD          = 6980d8e   what the agent can read from disk
+reviewed sha  = a3048ef   what the diff describes
+
+diff introduces      :  return a / b
+file on disk contains:  return a / b if b else 0
+```
+
+So reviewing an old commit, or any commit after the tree has moved on, hands the agent a diff
+contradicted by the files around it. It may reason about code that is no longer there, or
+miss a defect that a later commit happens to have fixed.
+
+**How much this matters is unverified.** An attempt to measure it could not be completed: the
+agent backend degraded during the session, answering a bare "reply with PONG" in 41 seconds and
+exceeding a 420-second budget twice. Every live measurement quoted elsewhere in this document
+was taken while the agent was fast and is unaffected, but this particular question remains
+open. It is recorded as a known limitation rather than a measured defect.
+
+The obvious fix is to run the review inside a throwaway worktree at the reviewed commit, which
+would also mean any staging damage landed in the worktree instead of the user's checkout. That
+is an architectural change, and it was **not** made, because an architectural change to review
+isolation should not be shipped unvalidated while the agent cannot be reached to test it.
+
 ### Observed: a reviewing agent can leave the repository uncommittable
 
 Found by running a genuinely hostile repository through the whole pipeline rather than by
