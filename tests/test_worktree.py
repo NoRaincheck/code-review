@@ -94,6 +94,7 @@ def _leaked(repo: Path, sha: str) -> Path:
         cwd=repo,
         check=True,
     )
+    (path / worktree.MARKER).write_text(f"{_dead_pid()}\n", encoding="utf-8")
     return path
 
 
@@ -643,3 +644,64 @@ def test_a_path_with_no_pid_in_its_name_is_not_considered_abandoned(
         assert worktree.owner_is_gone(mine) is False
     finally:
         _run_git(repo, "worktree", "remove", "--force", str(mine))
+
+
+def test_a_user_worktree_named_exactly_like_ours_is_never_reaped(
+    repo: Path, second_commit: str
+) -> None:
+    """The collision the marker exists to prevent.
+
+    The prefix is guessable, so a user can produce a path that looks exactly like one of ours.
+    Ownership inferred from the name alone would delete their worktree whenever the digits
+    happened to be a dead pid, which is a data-loss bug in a housekeeping step nobody asked for.
+    The digits here are deliberately a pid that has exited.
+    """
+    decoy = repo.parent / f"{worktree.PREFIX}{_dead_pid()}-decoy"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(decoy), "-b", "decoy", second_commit],
+        cwd=repo,
+        check=True,
+    )
+    try:
+        assert worktree.is_ours(decoy), "precondition: the name is indistinguishable from ours"
+        assert worktree.owner_is_gone(decoy) is True, "precondition: the pid is dead"
+
+        assert worktree.reap_stale(repo) == [], "reaped a worktree the user created"
+        assert decoy.is_dir(), "the user's worktree was deleted"
+        assert (decoy / ".git").is_file()
+    finally:
+        _run_git(repo, "worktree", "remove", "--force", str(decoy))
+
+
+def test_our_own_worktree_carries_the_marker(repo: Path, second_commit: str) -> None:
+    """Ownership is proven by the marker, and the marker records the owning pid."""
+    path = worktree.create(repo, second_commit)
+    try:
+        marker = path / worktree.MARKER
+        assert marker.is_file()
+        assert marker.read_text(encoding="utf-8").strip() == str(os.getpid())
+    finally:
+        worktree.remove(repo, path)
+
+
+def test_a_worktree_that_lost_its_marker_is_left_alone(repo: Path, second_commit: str) -> None:
+    """An agent that deletes the marker costs a reap, not somebody's work.
+
+    Erring this way is deliberate: the reap's failure mode is deletion, so a missing marker
+    must read as "not proven to be ours" rather than "ours, but inconvenient".
+    """
+    leaked = _leaked(repo, second_commit)
+    (leaked / worktree.MARKER).unlink()
+    try:
+        assert worktree.reap_stale(repo) == []
+        assert leaked.is_dir(), "removed a worktree we could not prove was ours"
+    finally:
+        worktree.remove(repo, leaked)
+
+
+def test_the_reap_still_removes_a_marked_leftover(repo: Path, second_commit: str) -> None:
+    """The marker must not disable reaping entirely, which is the easy way to break this."""
+    leaked = _leaked(repo, second_commit)
+    assert (leaked / worktree.MARKER).is_file(), "precondition: the leftover is marked"
+    assert [p.resolve() for p in worktree.reap_stale(repo)] == [leaked.resolve()]
+    assert not leaked.exists()
