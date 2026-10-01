@@ -194,17 +194,27 @@ def resolve_sha(repo: Path, rev: str = "HEAD") -> str:
 def load_commit(repo: Path, rev: str = "HEAD", max_diff_bytes: int | None = None) -> Commit:
     """Load a commit's metadata and its diff against its first parent.
 
-    For a merge commit (multiple parents) the diff is against the first parent, which
-    is the conventional "what did this commit introduce" view.
+    A merge needs its diff computed explicitly, because ``git show`` does not produce one: for
+    a merge it prints no patch at all unless ``--cc`` or ``-m`` is given, and neither is the
+    first-parent view. So a merge used to be handed to the agent with an *empty* diff, and the
+    agent duly reported "No issues found." about a commit it had never been shown. Since
+    ``post-commit`` fires on every merge, that is a stream of clean-looking verdicts about
+    nothing. Diffing the merge against its first parent is both the conventional reading of
+    "what did this commit introduce" and the thing the docstring already claimed happened.
     """
     sha = resolve_sha(repo, rev)
     fmt = "%n" + "%x00".join(FORMAT_FIELDS)
     fields = _parse_record(_run_bytes(repo, ["log", "-1", "--no-color", f"--format={fmt}", sha]))
-    patch = _run_bytes(repo, ["show", "--no-color", "--format=", sha]).strip(b"\n")
+    parents = fields["%P"].split()
+    if len(parents) > 1:
+        patch = _run_bytes(repo, ["diff", "--no-color", f"{parents[0]}", fields["%H"]])
+    else:
+        patch = _run_bytes(repo, ["show", "--no-color", "--format=", sha])
+    patch = patch.strip(b"\n")
     return Commit(
         sha=fields["%H"],
         short_sha=sha[:7],
-        parents=tuple(fields["%P"].split()),
+        parents=tuple(parents),
         subject=fields["%s"],
         body=fields["%b"].strip(),
         author_name=fields["%an"],

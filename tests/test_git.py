@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,58 @@ def test_multiline_body_is_parsed_correctly(repo: Path, git_run) -> None:
     assert "Body line one." in commit.body
     assert "Body line two with %H and %s lookalikes." in commit.body
     assert commit.author_email == "dev@example.com"
+
+
+def test_a_merge_commit_is_diffed_against_its_first_parent(
+    repo: Path, git_run: Callable[..., str]
+) -> None:
+    """`git show` produces no patch for a merge, so asking it for one yields nothing.
+
+    That is not a harmless empty diff: the agent is handed a commit with no changes and returns
+    "No issues found." about code it was never shown. And `post-commit` fires on every merge,
+    so a repository that merges regularly accumulates clean-looking verdicts about nothing.
+    """
+    (repo / "base.py").write_text("def base():\n    return 1\n", encoding="utf-8")
+    git_run(repo, "add", "base.py")
+    git_run(repo, "commit", "-q", "-m", "base")
+
+    git_run(repo, "checkout", "-q", "-b", "feature")
+    (repo / "feat.py").write_text("def feat():\n    return 2\n", encoding="utf-8")
+    git_run(repo, "add", "feat.py")
+    git_run(repo, "commit", "-q", "-m", "Add feat")
+
+    git_run(repo, "checkout", "-q", "main")
+    (repo / "other.py").write_text("def other():\n    return 3\n", encoding="utf-8")
+    git_run(repo, "add", "other.py")
+    git_run(repo, "commit", "-q", "-m", "Add other")
+    git_run(repo, "merge", "-q", "--no-ff", "feature", "-m", "Merge feature")
+
+    merge = git.load_commit(repo, "HEAD")
+    assert len(merge.parents) == 2
+    assert merge.diff.strip(), "a merge must carry a diff, or the verdict is about nothing"
+    assert "feat.py" in merge.diff, "the merge review should show what the merge brought in"
+    assert "other.py" not in merge.diff, "first-parent diff excludes what main already had"
+
+
+def test_an_empty_commit_has_no_diff(repo: Path, git_run: Callable[..., str]) -> None:
+    git_run(repo, "commit", "-q", "--allow-empty", "-m", "Nothing at all")
+    commit = git.load_commit(repo, "HEAD")
+    assert commit.diff.strip() == ""
+    assert commit.parents, "it is still a commit, just one that changed nothing"
+
+
+def test_a_root_commit_still_gets_its_whole_tree_as_a_diff(
+    repo: Path, git_run: Callable[..., str]
+) -> None:
+    """The no-parent case must not take the merge path and produce nothing."""
+    fresh = repo.parent / "rootonly"
+    subprocess.run(["git", "init", "-q", str(fresh)], check=True)
+    subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=fresh, check=True)
+    subprocess.run(["git", "config", "user.name", "A"], cwd=fresh, check=True)
+    (fresh / "only.py").write_text("x = 1\n", encoding="utf-8")
+    git_run(fresh, "add", "only.py")
+    git_run(fresh, "commit", "-q", "-m", "first")
+
+    commit = git.load_commit(fresh, "HEAD")
+    assert commit.parents == ()
+    assert "only.py" in commit.diff

@@ -679,7 +679,7 @@ def test_list_marks_reviews_that_produced_no_verdict(scripted_repo: tuple[Path, 
     listed = run_cli("list", "--repo", str(repo))
     assert listed.returncode == 0
     assert "!completed" in listed.stdout, listed.stdout
-    assert "without producing a verdict" in listed.stdout
+    assert "marked !" in listed.stdout
     assert listed.stderr == "", "the summary belongs on stdout with the rows"
 
 
@@ -692,7 +692,7 @@ def test_list_leaves_a_real_review_unmarked(scripted_repo: tuple[Path, str]) -> 
     listed = run_cli("list", "--repo", str(repo))
     assert "!completed" not in listed.stdout
     assert " completed" in listed.stdout, "the status column must still line up"
-    assert "without producing a verdict" not in listed.stdout
+    assert "marked !" not in listed.stdout
 
 
 def test_list_json_carries_the_warning(scripted_repo: tuple[Path, str]) -> None:
@@ -715,7 +715,7 @@ def test_status_reports_how_many_reviews_never_reviewed(scripted_repo: tuple[Pat
     wait_for_status(repo, sha)
 
     shown = run_cli("status", "--repo", str(repo))
-    assert "1 of those completed without producing a verdict" in shown.stdout, shown.stdout
+    assert "1 of those carry a warning" in shown.stdout, shown.stdout
 
 
 # -- what the agent actually did ----------------------------------------------------

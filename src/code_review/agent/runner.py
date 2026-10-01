@@ -69,6 +69,23 @@ def _client_capabilities() -> ClientCapabilities:
 WORKTREE_PLACEHOLDER = "<worktree>"
 
 
+def _assess(markdown: str, commit: Commit) -> str | None:
+    """The one thing worth saying about a finished review, or None if nothing is.
+
+    Checked in the order that matters. A commit with no diff is reported first, because in that
+    case the agent's verdict is about nothing at all: an empty commit, or a merge whose changes
+    are already present, produces a "No issues found." that is indistinguishable from a genuine
+    clean review of real code. Since ``post-commit`` fires on every commit, a repository with
+    occasional empty commits would accumulate verdicts that look like real coverage and are not.
+    """
+    if not commit.diff.strip():
+        return (
+            "this commit has no diff to review, so the verdict is about nothing; "
+            "it was an empty commit or a merge that introduced no changes"
+        )
+    return prompt_builder.missing_verdict(markdown)
+
+
 def _with_root_rewritten(tool_log: list[dict[str, Any]], root: Path) -> list[dict[str, Any]]:
     """Replace the worktree's absolute path in tool titles with a stable placeholder.
 
@@ -204,7 +221,7 @@ class ReviewRunner:
                 agent=agent.label,
                 usage=usage,
                 tool_log=_with_root_rewritten(client.tool_log(), root),
-                warning=prompt_builder.missing_verdict(markdown),
+                warning=_assess(markdown, commit),
             )
 
         return self._outcome
