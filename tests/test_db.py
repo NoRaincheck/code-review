@@ -330,6 +330,79 @@ def test_close_is_safe_twice_and_after_a_failed_construction(tmp_path: Path) -> 
     partial.close()  # must not raise
 
 
+def test_a_failed_transaction_rolls_back_and_leaves_the_connection_usable(
+    database: Database,
+) -> None:
+    """An exception mid-transaction must not leave the connection inside one.
+
+    Without the rollback the next write on this connection fails with "cannot start a
+    transaction within a transaction", and because the daemon caches one Database per
+    repository, that would break every later review for that repo.
+    """
+    before = database.enqueue("a" * 40, "main")
+
+    with pytest.raises(RuntimeError, match="deliberate"):
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO reviews(sha, status, created_at) VALUES(?, 'queued', 'now')",
+                ("b" * 40,),
+            )
+            raise RuntimeError("deliberate")
+
+    assert database.get("b" * 40) is None, "the rolled-back row should be gone"
+
+    # The connection still works, which is the actual point.
+    after, created = database.enqueue("c" * 40, "main")
+    assert created
+    assert after != before
+    assert database.get("c" * 40) is not None
+
+
+def test_a_failed_enqueue_leaves_no_partial_row(database: Database) -> None:
+    with pytest.raises(RuntimeError):
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO reviews(sha, status, created_at) VALUES(?, 'queued', 'now')",
+                ("d" * 40,),
+            )
+            raise RuntimeError("boom")
+    assert database.counts()["total"] == 0
+
+
+def test_schema_version_write_tolerates_a_locked_database(tmp_path: Path) -> None:
+    """Recording the version is advisory; failing to must not stop the caller reading.
+
+    This branch exists because a concurrent writer once made every read-only command fail
+    with "database is locked", so the tolerance itself needs a test.
+    """
+    path = tmp_path / "reviews.db"
+    with Database(path) as db:
+        db.enqueue("a" * 40, "main")
+
+    blocker = sqlite3.connect(path, isolation_level=None, timeout=1)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        blocker.execute(
+            "INSERT INTO reviews(sha, status, created_at) VALUES(?, 'running', 'now')",
+            ("b" * 40,),
+        )
+        db = Database(path)
+        try:
+            # Construction succeeded despite the lock, and reads still work.
+            assert db.get("a" * 40) is not None
+        finally:
+            db.close()
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    # Once the lock clears, the marker is written on a later open.
+    with Database(path) as db:
+        row = db._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        assert row is not None
+        assert row["value"] == "1"
+
+
 def test_schema_is_created_for_a_fresh_database(tmp_path: Path) -> None:
     path = tmp_path / "new.db"
     with Database(path) as db:

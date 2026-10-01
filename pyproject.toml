@@ -24,6 +24,7 @@ dev = [
     "mypy>=1.18",
     "pytest>=8.4",
     "pytest-asyncio>=1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.14",
 ]
 
