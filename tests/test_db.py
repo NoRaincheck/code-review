@@ -519,3 +519,72 @@ def test_migrating_twice_is_harmless(tmp_path: Path) -> None:
             db.enqueue("e" * 40, "main")
     with Database(path) as db:
         assert db.get("e" * 40) is not None
+
+
+def test_requeuing_clears_a_previous_warning(tmp_path: Path) -> None:
+    """A warning describes one attempt, so it must not survive into the next one.
+
+    Otherwise `show` on a review that is queued and has not run reports a verdict about output
+    that does not exist yet, which is the exact failure the warning was added to prevent.
+    """
+    with Database(tmp_path / "stale.db") as db:
+        review_id, _ = db.enqueue("f" * 40, "main")
+        db.complete(
+            review_id,
+            markdown="I'll start by examining the repository.",
+            stop_reason="end_turn",
+            agent="fake",
+            warning="the agent did not open with a verdict",
+        )
+        assert db.get("f" * 40).warning is not None, "precondition"
+
+        db.enqueue("f" * 40, "main", force=True)
+        requeued = db.get("f" * 40)
+
+    assert requeued.status is Status.QUEUED
+    assert requeued.warning is None, "a stale warning outlived the review that produced it"
+
+
+def test_a_warning_cannot_survive_a_later_failure_or_cancellation(tmp_path: Path) -> None:
+    """Every terminal transition leaves the column agreeing with the status it describes."""
+    with Database(tmp_path / "transitions.db") as db:
+        first, _ = db.enqueue("1" * 40, "main")
+        db.complete(
+            first,
+            markdown="narration",
+            stop_reason="end_turn",
+            agent="fake",
+            warning="warned",
+        )
+        second, _ = db.enqueue("1" * 40, "main", force=True)
+        db.fail(second, "agent crashed")
+        assert db.get("1" * 40).warning is None
+
+        third, _ = db.enqueue("1" * 40, "main", force=True)
+        db.complete(
+            third, markdown="narration", stop_reason="end_turn", agent="fake", warning="warned"
+        )
+        fourth, _ = db.enqueue("1" * 40, "main", force=True)
+        db.cancel(fourth)
+        assert db.get("1" * 40).warning is None
+
+
+def test_warned_reviews_can_be_counted(tmp_path: Path) -> None:
+    """`status` reports this, so it has to agree with the column the warning lives in."""
+    with Database(tmp_path / "counts.db") as db:
+        assert db.count_warned() == 0
+
+        warned, _ = db.enqueue("a1" * 20, "main")
+        db.complete(
+            warned,
+            markdown="Let me start by reading.",
+            stop_reason="end_turn",
+            agent="fake",
+            warning="no verdict",
+        )
+        clean, _ = db.enqueue("b2" * 20, "main")
+        db.complete(clean, markdown="No issues found.", stop_reason="end_turn", agent="fake")
+        failed, _ = db.enqueue("c3" * 20, "main")
+        db.fail(failed, "crashed")
+
+        assert db.count_warned() == 1, "only warned-and-completed reviews count"

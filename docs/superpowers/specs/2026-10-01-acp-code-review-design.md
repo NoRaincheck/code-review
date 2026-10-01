@@ -892,5 +892,24 @@ would be false positives on good output, so a short preamble is tolerated; but n
 mentions the word "issues" must not talk its way past the check, so only whole lines are
 matched, and a verdict twenty lines down does not count.
 
+The warning has to be visible wherever a user actually looks, which turned out to be the harder
+half. It first appeared only in ``show``, and since ``show`` needs a sha, a user reading ``list``
+saw two rows marked ``completed`` whose subject was the agent narrating itself, and ``status``
+reported ``completed 2``. So:
+
+* ``list`` marks a warned row with ``!`` and says how many there are. The marker is in the
+  status column, not the subject, so the text stays the review's own words.
+* ``status`` counts them, and points at ``list`` for the detail.
+* ``list --json`` carries the ``warning`` field, so a scripted consumer is not left out.
+* ``show`` prints the warning *before* the markdown on both the raw and rendered paths, because
+  a warning somebody scrolls past is not a warning. Only for a completed review, since a warning
+  describes completed output and attaching one to a queued row reports on a review that has not
+  happened.
+
+Every state transition clears the column. Requeuing a review to run it again resets it, as do
+failure and cancellation, so a warning can never outlive the attempt that produced it. That was
+caught by testing the shape rather than the feature: ``complete`` overwrites the column anyway,
+so the bug was invisible until something read a row mid-flight.
+
 This is the second defect the fake agent could never have found, and the first one that needed
 a real agent, a real repository and a diff big enough to make the agent explore.

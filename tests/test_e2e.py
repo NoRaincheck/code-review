@@ -601,3 +601,97 @@ def test_the_stored_tool_log_has_no_temporary_path(scripted_repo: tuple[Path, st
     assert review.status is Status.COMPLETED, review.error
     blob = json.dumps(review.tool_log)
     assert "code-review-" not in blob, f"the worktree path was persisted: {blob[:400]}"
+
+
+def test_a_queued_review_shows_no_stale_warning(scripted_repo: tuple[Path, str]) -> None:
+    """The end-to-end shape of the stale-warning bug: report nothing about a review that has
+    not run, rather than repeating the previous attempt's verdict about it."""
+    repo, _ = scripted_repo
+    sha = git.resolve_sha(repo, "HEAD")
+    narration = Path(tempfile.mkdtemp(prefix="crn")) / "agent.json"
+    narration.write_text(json.dumps({"chunks": ["Let me start by reading the files."]}), "utf-8")
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(narration)!r}]\n",
+        encoding="utf-8",
+    )
+    assert run_cli("review", sha, "--inline", "--repo", str(repo)).returncode == 0
+    assert wait_for_status(repo, sha).warning is not None, "precondition"
+
+    # Put it back to queued, which is what `review --force` does internally, and confirm
+    # nothing is claimed about a review that has not run.
+    database = Database.for_repo(repo)
+    try:
+        database.enqueue(sha, force=True)
+        requeued = database.get(sha)
+    finally:
+        database.close()
+    assert requeued is not None and requeued.status is Status.QUEUED
+
+    shown = run_cli("show", sha, "--repo", str(repo))
+    assert "warning" not in shown.stderr, shown.stderr
+    assert "no review yet" in shown.stdout.lower()
+
+
+def _narrating_repo(repo: Path) -> None:
+    script = Path(tempfile.mkdtemp(prefix="crn")) / "agent.json"
+    script.write_text(
+        json.dumps({"chunks": ["I will start by exploring the repository structure."]}),
+        encoding="utf-8",
+    )
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n", encoding="utf-8"
+    )
+
+
+def test_list_marks_reviews_that_produced_no_verdict(scripted_repo: tuple[Path, str]) -> None:
+    """`list` is what people scan, so a review that did not review must show up there.
+
+    Without this the only place the warning appeared was `show`, which means a user reading
+    `list` sees a clean `completed` row and a subject line that is the agent narrating itself.
+    """
+    repo, _ = scripted_repo
+    _narrating_repo(repo)
+    sha = git.resolve_sha(repo, "HEAD")
+    assert run_cli("review", sha, "--inline", "--repo", str(repo)).returncode == 0
+    assert wait_for_status(repo, sha).warning is not None
+
+    listed = run_cli("list", "--repo", str(repo))
+    assert listed.returncode == 0
+    assert "!completed" in listed.stdout, listed.stdout
+    assert "without producing a verdict" in listed.stdout
+    assert listed.stderr == "", "the summary belongs on stdout with the rows"
+
+
+def test_list_leaves_a_real_review_unmarked(scripted_repo: tuple[Path, str]) -> None:
+    repo, _ = scripted_repo
+    sha = git.resolve_sha(repo, "HEAD")
+    assert run_cli("review", sha, "--inline", "--repo", str(repo)).returncode == 0
+    assert wait_for_status(repo, sha).warning is None
+
+    listed = run_cli("list", "--repo", str(repo))
+    assert "!completed" not in listed.stdout
+    assert " completed" in listed.stdout, "the status column must still line up"
+    assert "without producing a verdict" not in listed.stdout
+
+
+def test_list_json_carries_the_warning(scripted_repo: tuple[Path, str]) -> None:
+    """A scripted consumer has no other way to see it."""
+    repo, _ = scripted_repo
+    _narrating_repo(repo)
+    sha = git.resolve_sha(repo, "HEAD")
+    run_cli("review", sha, "--inline", "--repo", str(repo))
+    wait_for_status(repo, sha)
+
+    payload = json.loads(run_cli("list", "--json", "--repo", str(repo)).stdout)
+    assert payload[0]["warning"] is not None
+
+
+def test_status_reports_how_many_reviews_never_reviewed(scripted_repo: tuple[Path, str]) -> None:
+    repo, _ = scripted_repo
+    _narrating_repo(repo)
+    sha = git.resolve_sha(repo, "HEAD")
+    run_cli("review", sha, "--inline", "--repo", str(repo))
+    wait_for_status(repo, sha)
+
+    shown = run_cli("status", "--repo", str(repo))
+    assert "1 of those completed without producing a verdict" in shown.stdout, shown.stdout
