@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from code_review import paths
+from code_review.daemon import client as daemon_client_module
 from code_review.daemon import protocol, supervisor
 from code_review.daemon.server import DaemonServer
 from code_review.daemon.worker import Worker
@@ -464,17 +465,93 @@ async def test_client_reports_a_refusal(live_server: DaemonServer, repo: Path) -
         await client.call("enqueue", {"repo": str(repo)}, timeout=5.0)
 
 
-async def test_client_reports_an_unreachable_daemon(isolated_home: Path, tmp_path: Path) -> None:
-    from code_review.daemon import client
+async def test_client_reports_an_unreachable_daemon(isolated_home: Path) -> None:
+    from code_review.daemon import client as sync_client
 
-    with pytest.raises(client.DaemonUnavailable):
-        await client.call("ping", timeout=1.0)
+    with pytest.raises(sync_client.DaemonUnavailable):
+        await sync_client.call("ping", timeout=1.0)
 
 
 async def test_ping_returns_false_when_no_socket(isolated_home: Path) -> None:
-    from code_review.daemon import client
+    from code_review.daemon import client as sync_client
 
-    assert client.ping() is False
+    assert sync_client.ping() is False
+
+
+async def test_malformed_frame_gets_an_error_reply_not_a_dead_daemon(
+    live_server: DaemonServer,
+) -> None:
+    """A client sending junk must be answered, not crash the daemon."""
+    reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
+    try:
+        writer.write(b"this is not json\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(protocol.read_message(reader), 5)
+        assert reply is not None
+        assert reply["ok"] is False
+        assert "protocol error" in reply["error"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    # The daemon is still answering afterwards.
+    assert (await asyncio.wait_for(protocol.read_message(reader), 1)) is None
+
+
+async def test_a_frame_that_is_not_an_object_is_refused(live_server: DaemonServer) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
+    try:
+        writer.write(b"[1, 2, 3]\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(protocol.read_message(reader), 5)
+        assert reply is not None
+        assert reply["ok"] is False
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_a_client_that_disconnects_mid_frame_is_survived(
+    live_server: DaemonServer,
+) -> None:
+    """The hook can vanish at any moment; the daemon must stay up."""
+    for _ in range(3):
+        _reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
+        writer.write(b'{"op": "pi')  # truncated, then close
+        writer.close()
+        await writer.wait_closed()
+
+    assert (await daemon_client_module.call("ping", timeout=5))["pong"] is True
+
+
+async def test_server_survives_a_client_sending_a_partial_frame(
+    live_server: DaemonServer,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(str(paths.socket_path()))
+    try:
+        writer.write(b'{"op": "ping", "params": {}}')  # no newline, never completed
+        await writer.drain()
+        await asyncio.sleep(0.2)
+        writer.write(b"\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(protocol.read_message(reader), 5)
+        assert reply is not None
+        assert reply["ok"] is True
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_shutdown_request_stops_the_server(
+    live_server: DaemonServer, isolated_home: Path
+) -> None:
+    result = await daemon_client_module.call("shutdown", timeout=5)
+    assert result["stopping"] is True
+    for _ in range(100):
+        if not paths.socket_path().exists():
+            break
+        await asyncio.sleep(0.05)
+    assert not paths.socket_path().exists()
 
 
 # -- supervisor ------------------------------------------------------------

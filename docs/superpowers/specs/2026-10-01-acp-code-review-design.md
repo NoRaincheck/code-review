@@ -409,7 +409,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-306 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+340 tests, 72% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
@@ -482,6 +482,30 @@ the agent's intentions look good.
 Config values come from the repo's own `.codereview.toml`, so `review_agent` and
 `review_agent_env` can point an agent at arbitrary executables and inject arbitrary
 environment. Treat that file as trusted, the same way you treat a `Makefile` or `.githooks`.
+
+### Coverage, and what the number does not mean
+
+Measured with `pytest --cov`, so the gaps are data rather than intuition. What it found:
+
+- **`policy_client.py` at 74%** was the important one. The layer under `policy.py`: the client
+  methods an agent can call directly, and the filesystem boundary `read_text_file` enforces.
+  The refusal methods and the path-confinement rejection had *no* tests, so "the agent cannot
+  write and cannot read outside the repo" was an untested claim about the whole second line of
+  defence. Now covered directly, including symlink escapes out of the repository. 74% → 94%.
+- **`db.py`** — the rollback-on-exception branch was uncovered. It matters because the daemon
+  caches one `Database` per repository, so a connection left inside a transaction would break
+  every later review for that repo. Verified by mutation: deleting the `ROLLBACK` makes both
+  rollback tests fail.
+- **`server.py` at 74%** — the connection error paths: malformed frames, truncated frames, and
+  a client that vanishes mid-write. The hook can disappear at any moment, and those paths must
+  not take the daemon down.
+
+Two numbers are misleading rather than informative and are not worth chasing:
+
+- **`cli.py` reads 0%** because the end-to-end tests invoke it as a subprocess, which coverage
+  cannot see. It is exercised heavily; the report just cannot observe it.
+- **`daemon/client.py` at 58%** is the same artifact, for the synchronous helpers the hook
+  calls.
 
 ## 14. Bugs the tests and smoke test caught
 

@@ -159,11 +159,17 @@ Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the
 
 ```bash
 ./scripts/check.sh          # syntax, ruff, mypy --strict, tests, leaked-daemon check
+
+uv run pytest --cov=code_review --cov-report=term-missing   # coverage
 ```
 
 The ACP integration is tested against `tests/fake_agent.py`, a real ACP agent implemented
 over stdio and driven by a script, so the whole hook → daemon → agent → storage path is
 covered without calling a model.
+
+Coverage reads low for `cli.py` and `daemon/client.py` because the end-to-end tests invoke
+the CLI as a subprocess, which coverage cannot observe. Those paths are exercised; the report
+just cannot see it.
 
 The design, including every decision and its alternatives, is in
 [`docs/superpowers/specs/2026-10-01-acp-code-review-design.md`](docs/superpowers/specs/2026-10-01-acp-code-review-design.md).
