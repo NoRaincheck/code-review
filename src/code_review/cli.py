@@ -121,10 +121,17 @@ def _relative_time(iso: str | None) -> str:
 # -- commands --------------------------------------------------------------
 
 
+def database_path(repo: Path) -> Path:
+    """The review database for *repo*, which lives under the shared git directory.
+
+    Resolved through git rather than by joining paths, because in a linked worktree ``.git``
+    is a file. One helper so every command reports the path the daemon actually uses.
+    """
+    return paths.db_path(git.common_dir(repo))
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     repo = _repo_or_fail(args.repo)
-    state = paths.state_dir(repo)
-    state.mkdir(parents=True, exist_ok=True)
 
     database = _open_db(repo)
     database.close()
@@ -141,8 +148,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     config_state = "configured" if config.agent else "no review_agent set"
 
     print(f"repository:  {repo}")
-    print(f"state dir:   {state}")
-    print(f"database:    {paths.db_path(repo)}")
+    print(f"database:    {database_path(repo)}")
     print(f"hook:        {hook_state} ({hook_path})")
     print(f"gitignore:   {'updated' if gitignored else 'already ignored'}")
     print(f"config:      {config_state}")
@@ -566,7 +572,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _report_agent(repo, config, probe=args.probe)
 
     print(f"hook:        {'installed' if hook_module.is_installed(repo) else 'not installed'}")
-    print(f"database:    {paths.db_path(repo)}")
+    print(f"database:    {database_path(repo)}")
     print(f"daemon:      {'running' if supervisor.is_running() else 'stopped'}")
     return EXIT_OK
 

@@ -159,3 +159,57 @@ def test_each_allowlisted_subcommand_is_classified_as_read_only(subcommand: str)
     from code_review.policy import classify_git_argv
 
     assert classify_git_argv(["git", subcommand]).allowed
+
+
+# -- the throwaway-worktree write surface -------------------------------------------
+
+# worktree.py is the only module permitted to write to the repository, and it may only do so
+# to a directory it created itself. That is a real write to the user's shared git directory,
+# so it is constrained explicitly rather than assumed.
+WORKTREE_WRITES = {"add", "remove", "prune", "list"}
+
+
+def _worktree_argv_literals() -> set[str]:
+    source = (SRC / "worktree.py").read_text(encoding="utf-8")
+    return set(re.findall(r'\["worktree", "([a-z-]+)"', source))
+
+
+def test_worktree_module_only_runs_the_four_expected_subcommands() -> None:
+    used = _worktree_argv_literals()
+    assert used <= WORKTREE_WRITES, (
+        f"unexpected worktree subcommands: {sorted(used - WORKTREE_WRITES)}"
+    )
+
+
+def test_worktree_module_never_names_a_mutating_ref_command() -> None:
+    """No commit, no branch, no ref update: a review may not change the repository's history."""
+    source = (SRC / "worktree.py").read_text(encoding="utf-8")
+    for forbidden in ("commit", "checkout", "switch", "reset", "branch", "update-ref", "push"):
+        assert f'"{forbidden}"' not in source, f"worktree.py may not run git {forbidden}"
+
+
+def test_worktree_add_is_always_detached() -> None:
+    """The reason this is cheap. A branch checkout would create a ref in the user's repo."""
+    source = (SRC / "worktree.py").read_text(encoding="utf-8")
+    adds = [line for line in source.splitlines() if '"worktree", "add"' in line]
+    assert adds, "expected a worktree add call site"
+    for line in adds:
+        assert '"--detach"' in line, f"worktree add without --detach: {line.strip()}"
+
+
+def test_every_worktree_created_is_ours_and_prunable() -> None:
+    """Removal must be able to recognize what it created, including after a crash."""
+    from code_review import worktree
+
+    assert worktree.PREFIX, "worktrees need a recognizable prefix"
+    assert worktree.is_ours(Path(f"/tmp/{worktree.PREFIX}abc"))
+    assert not worktree.is_ours(Path("/tmp/user-worktree"))
+
+
+def test_worktree_removal_is_forced() -> None:
+    """An agent may have written into the worktree; teardown must not depend on it being clean."""
+    source = (SRC / "worktree.py").read_text(encoding="utf-8")
+    removes = [line for line in source.splitlines() if '"worktree", "remove"' in line]
+    assert removes, "expected a worktree remove call site"
+    for line in removes:
+        assert '"--force"' in line, f"worktree remove without --force: {line.strip()}"

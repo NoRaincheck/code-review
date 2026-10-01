@@ -6,6 +6,7 @@ caching, no daemon state, so it is testable against real temporary repositories.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,15 +39,76 @@ class Commit:
     diff: str
 
 
-def _run(repo: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> str:
-    result = subprocess.run(
+# Variables git exports into a hook's environment, which then describe the repository and
+# index of whatever commit was being made. They are relative paths, and they are only correct
+# for the process git spawned.
+#
+# The post-commit hook starts the daemon, so without removing these the daemon inherits them
+# for its whole life and every git command it later runs in a *different* repository resolves
+# its index against the wrong place. This was not hypothetical: `git worktree add` failed with
+# "index file open failed: Not a directory" because an inherited GIT_INDEX_FILE=.git/index was
+# resolved against a directory that was not a git repository at all. The read paths had been
+# quietly tolerant of it; the repair command, which writes the index, was not.
+#
+# An explicit list rather than a GIT_* wildcard, because a user is entitled to carry
+# GIT_SSH_COMMAND or GIT_CONFIG_GLOBAL into this tool and have it respected.
+_INHERITED_GIT_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+)
+
+
+def clean_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """*base* (default: this process) without the repository-locating variables git exports
+    to hooks, so a git command here is located by its ``cwd`` and nothing else."""
+    env = dict(os.environ if base is None else base)
+    for name in _INHERITED_GIT_ENV:
+        env.pop(name, None)
+    return env
+
+
+# Every git call in this module goes through one of the two helpers below, deliberately.
+# Hand-adding `env=clean_env()` to each call site already went wrong once: five of the seven
+# call sites were missed, and two of those were the ones that write the index, which is
+# exactly what an inherited hook environment corrupts. One funnel, no omissions.
+
+
+def _spawn_text(
+    repo: Path, args: list[str], *, timeout: int = DEFAULT_TIMEOUT, stdin: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         ["git", *args],
         cwd=repo,
+        input=stdin,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        env=clean_env(),
     )
+
+
+def _spawn_bytes(
+    repo: Path, args: list[str], *, timeout: int = DEFAULT_TIMEOUT
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        env=clean_env(),
+    )
+
+
+def _run(repo: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> str:
+    result = _spawn_text(repo, args, timeout=timeout)
     if result.returncode != 0:
         raise GitError(args, result.returncode, result.stderr)
     return result.stdout
@@ -60,13 +122,7 @@ FORMAT_FIELDS = ("%H", "%P", "%s", "%an", "%ae", "%aI", "%b")
 
 
 def _run_bytes(repo: Path, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> bytes:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    result = _spawn_bytes(repo, args, timeout=timeout)
     if result.returncode != 0:
         raise GitError(args, result.returncode, result.stderr.decode("utf-8", "replace"))
     return result.stdout
@@ -180,13 +236,7 @@ def truncate_diff(diff: str, max_bytes: int | None) -> str:
 
 def is_ancestor(repo: Path, maybe_ancestor: str, descendant: str) -> bool:
     try:
-        result = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", maybe_ancestor, descendant],
-            cwd=repo,
-            capture_output=True,
-            timeout=DEFAULT_TIMEOUT,
-            check=False,
-        )
+        result = _spawn_text(repo, ["merge-base", "--is-ancestor", maybe_ancestor, descendant])
     except subprocess.SubprocessError:
         return False
     return result.returncode == 0
@@ -214,14 +264,7 @@ def check_index(repo: Path) -> IndexHealth:
     never written to this repository's object store. The user's next ``git commit`` then fails
     with ``invalid object``, which is cryptic and disconnected from the review that caused it.
     """
-    result = subprocess.run(
-        ["git", "write-tree"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=DEFAULT_TIMEOUT,
-        check=False,
-    )
+    result = _spawn_text(repo, ["write-tree"])
     if result.returncode == 0:
         return IndexHealth(intact=True)
     detail = (result.stderr or result.stdout).strip().splitlines()
@@ -235,14 +278,7 @@ def dangling_index_paths(repo: Path) -> list[str]:
     regardless of index size. These are exactly the paths that must be unstaged to make the
     repository committable again.
     """
-    listing = subprocess.run(
-        ["git", "ls-files", "-s", "-z"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=DEFAULT_TIMEOUT,
-        check=False,
-    )
+    listing = _spawn_text(repo, ["ls-files", "-s", "-z"])
     if listing.returncode != 0:
         return []
 
@@ -258,14 +294,10 @@ def dangling_index_paths(repo: Path) -> list[str]:
     if not entries:
         return []
 
-    batch = subprocess.run(
-        ["git", "cat-file", "--batch-check"],
-        cwd=repo,
-        input="\n".join(sha for sha, _ in entries) + "\n",
-        capture_output=True,
-        text=True,
-        timeout=DEFAULT_TIMEOUT,
-        check=False,
+    batch = _spawn_text(
+        repo,
+        ["cat-file", "--batch-check"],
+        stdin="\n".join(sha for sha, _ in entries) + "\n",
     )
     if batch.returncode != 0:
         return []
@@ -289,14 +321,7 @@ def unstage_paths(repo: Path, paths: list[str]) -> tuple[bool, str]:
     """
     if not paths:
         return False, "no paths given"
-    result = subprocess.run(
-        ["git", "restore", "--staged", "--", *paths],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=DEFAULT_TIMEOUT,
-        check=False,
-    )
+    result = _spawn_text(repo, ["restore", "--staged", "--", *paths])
     if result.returncode == 0:
         return True, f"unstaged {len(paths)} path(s)"
     detail = (result.stderr or result.stdout).strip()

@@ -37,8 +37,21 @@ def state_dir(repo: Path) -> Path:
     return repo / STATE_DIR_NAME
 
 
-def db_path(repo: Path) -> Path:
-    return state_dir(repo) / DB_FILE_NAME
+def db_dir(git_common_dir: Path) -> Path:
+    """Where the review database lives: inside the shared git directory.
+
+    Shared across worktrees by construction, which is the point. A per-worktree path inside
+    the checkout would mean the same commit reviewed once per worktree, and `show` in one
+    worktree unable to see another's reviews.
+
+    Living under `.git` also means no `.gitignore` entry is needed and nothing is written
+    into the user's tracked tree.
+    """
+    return git_common_dir / STATE_DIR_NAME
+
+
+def db_path(git_common_dir: Path) -> Path:
+    return db_dir(git_common_dir) / DB_FILE_NAME
 
 
 def config_path(repo: Path) -> Path:

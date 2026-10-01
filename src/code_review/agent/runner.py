@@ -17,7 +17,7 @@ from typing import Any
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.schema import ClientCapabilities, FileSystemCapabilities, Implementation
 
-from .. import policy
+from .. import policy, worktree
 from .. import prompt as prompt_builder
 from ..config import AgentConfig, Config
 from ..git import Commit
@@ -106,65 +106,73 @@ class ReviewRunner:
 
     async def review(self, commit: Commit) -> ReviewOutcome:
         agent = self.config.require_agent()
-        client = ReviewClient(
-            config=ReviewClientConfig(
-                repo=self.repo,
-                deny_unknown_commands=self.config.deny_unknown_commands,
-            )
-        )
-        self._client = client
         prompt_text = prompt_builder.build_prompt(commit, self.config.review_guidelines)
 
-        try:
-            async with spawn_agent_process(
-                client,
-                agent.command,
-                *agent.args,
-                env=_build_env(agent),
-                cwd=str(self.repo),
-            ) as (conn, _process):
-                await conn.initialize(
-                    protocol_version=PROTOCOL_VERSION,
-                    client_capabilities=_client_capabilities(),
-                    client_info=self.client_info,
+        # The agent's root is a throwaway worktree at the reviewed commit, never the user's
+        # checkout. What it reads is then the code the review is actually about, and anything
+        # it stages is deleted with the directory rather than left in the user's index. The
+        # cost is a registration under the shared git directory, which is removed again in the
+        # same breath; worktree.py spells out that trade in full.
+        with worktree.isolated(self.repo, commit.sha) as root:
+            client = ReviewClient(
+                config=ReviewClientConfig(
+                    repo=root,
+                    deny_unknown_commands=self.config.deny_unknown_commands,
                 )
-                session = await conn.new_session(cwd=str(self.repo), mcp_servers=[])
+            )
+            self._client = client
 
-                stop_reason, response_usage = await self._prompt_with_timeout(
-                    conn, session.session_id, prompt_text
+            try:
+                async with spawn_agent_process(
+                    client,
+                    agent.command,
+                    *agent.args,
+                    env=_build_env(agent),
+                    cwd=str(root),
+                ) as (conn, _process):
+                    await conn.initialize(
+                        protocol_version=PROTOCOL_VERSION,
+                        client_capabilities=_client_capabilities(),
+                        client_info=self.client_info,
+                    )
+                    session = await conn.new_session(cwd=str(root), mcp_servers=[])
+
+                    stop_reason, response_usage = await self._prompt_with_timeout(
+                        conn, session.session_id, prompt_text
+                    )
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                # Deliberately not wrapped. Callers distinguish a timeout from a failure in
+                # order to keep whatever markdown streamed before the deadline, and wrapping
+                # this in ReviewError would discard it and mislabel the review as broken.
+                raise
+            except FileNotFoundError as exc:
+                raise ReviewError(
+                    f"agent command not found: {agent.command!r}. "
+                    f"Install it or set review_agent in .codereview.toml."
+                ) from exc
+            except PermissionError as exc:
+                raise ReviewError(f"agent attempted a forbidden operation: {exc}") from exc
+            except Exception as exc:
+                raise ReviewError(f"{type(exc).__name__}: {exc}") from exc
+
+            markdown = client.markdown()
+            if not markdown:
+                raise ReviewError(
+                    f"agent produced no output (stop_reason={stop_reason}). "
+                    f"It may have refused, or may not support ACP properly."
                 )
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            # Deliberately not wrapped. Callers distinguish a timeout from a failure in
-            # order to keep whatever markdown streamed before the deadline, and wrapping
-            # this in ReviewError would discard it and mislabel the review as broken.
-            raise
-        except FileNotFoundError as exc:
-            raise ReviewError(
-                f"agent command not found: {agent.command!r}. "
-                f"Install it or set review_agent in .codereview.toml."
-            ) from exc
-        except PermissionError as exc:
-            raise ReviewError(f"agent attempted a forbidden operation: {exc}") from exc
-        except Exception as exc:
-            raise ReviewError(f"{type(exc).__name__}: {exc}") from exc
 
-        markdown = client.markdown()
-        if not markdown:
-            raise ReviewError(
-                f"agent produced no output (stop_reason={stop_reason}). "
-                f"It may have refused, or may not support ACP properly."
+            usage = client.usage or response_usage
+            self._outcome = ReviewOutcome(
+                markdown=markdown,
+                stop_reason=stop_reason,
+                agent=agent.label,
+                usage=usage,
+                tool_log=client.tool_log(),
             )
 
-        usage = client.usage or response_usage
-        self._outcome = ReviewOutcome(
-            markdown=markdown,
-            stop_reason=stop_reason,
-            agent=agent.label,
-            usage=usage,
-            tool_log=client.tool_log(),
-        )
         return self._outcome
 
     async def _prompt_with_timeout(
