@@ -18,8 +18,9 @@ from code_review.policy import READ_ONLY_GIT_SUBCOMMANDS
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "code_review"
 
-# Subcommands that modify the repository, its index, or its object store. None may appear
-# in a command this codebase builds.
+# Subcommands that modify the repository, its refs, or its object store. None may appear in
+# a command this codebase builds. `restore` is handled separately below: with `--staged` it
+# touches only the index, which the repair command needs.
 WRITE_SUBCOMMANDS = {
     "add",
     "am",
@@ -42,7 +43,6 @@ WRITE_SUBCOMMANDS = {
     "reflog",
     "remote",
     "reset",
-    "restore",
     "revert",
     "rm",
     "stash",
@@ -53,6 +53,10 @@ WRITE_SUBCOMMANDS = {
     "update-ref",
     "worktree",
 }
+
+# The single write this tool performs, and only to repair damage an agent caused. It rewrites
+# index entries only: no working-tree file, ref, or object is touched.
+INDEX_ONLY_EXCEPTIONS = {"restore"}
 
 # Subcommands this tool is allowed to run for reading.
 EXPECTED_READS = {"rev-parse", "show", "log", "merge-base"}
@@ -66,8 +70,18 @@ def _argv_literals() -> set[str]:
 
 def test_git_module_only_uses_read_only_subcommands() -> None:
     reads = _argv_literals()
-    offenders = reads & WRITE_SUBCOMMANDS
+    offenders = reads & WRITE_SUBCOMMANDS - INDEX_ONLY_EXCEPTIONS
     assert not offenders, f"git.py can execute write subcommands: {sorted(offenders)}"
+
+
+def test_the_only_write_is_index_only() -> None:
+    """`restore` appears once, always with --staged, so no content or ref can change."""
+    source = (SRC / "git.py").read_text(encoding="utf-8")
+    lines = [line for line in source.splitlines() if '"restore"' in line]
+    assert len(lines) == 1, f"unexpected number of restore call sites: {lines}"
+    assert "--staged" in lines[0], "restore must be index-only"
+    # --staged alone would still need a path separator to avoid ambiguity.
+    assert '"--",' in lines[0] or '"--", *paths' in lines[0], "paths must follow --"
 
 
 def test_git_module_reads_the_expected_subcommands() -> None:

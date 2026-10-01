@@ -226,3 +226,78 @@ def check_index(repo: Path) -> IndexHealth:
         return IndexHealth(intact=True)
     detail = (result.stderr or result.stdout).strip().splitlines()
     return IndexHealth(intact=False, detail=detail[0] if detail else "git write-tree failed")
+
+
+def dangling_index_paths(repo: Path) -> list[str]:
+    """Indexed paths whose blob is absent from the object store.
+
+    One ``git cat-file --batch-check`` covers every entry, so the cost is a single process
+    regardless of index size. These are exactly the paths that must be unstaged to make the
+    repository committable again.
+    """
+    listing = subprocess.run(
+        ["git", "ls-files", "-s", "-z"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=DEFAULT_TIMEOUT,
+        check=False,
+    )
+    if listing.returncode != 0:
+        return []
+
+    entries: list[tuple[str, str]] = []
+    for record in listing.stdout.split("\0"):
+        if not record.strip():
+            continue
+        # "<mode> <sha> <stage>\t<path>"
+        meta, _, path = record.partition("\t")
+        parts = meta.split()
+        if len(parts) >= 2 and path:
+            entries.append((parts[1], path))
+    if not entries:
+        return []
+
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch-check"],
+        cwd=repo,
+        input="\n".join(sha for sha, _ in entries) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=DEFAULT_TIMEOUT,
+        check=False,
+    )
+    if batch.returncode != 0:
+        return []
+
+    verdicts = [line.strip() for line in batch.stdout.splitlines()]
+    if len(verdicts) != len(entries):  # pragma: no cover - malformed output
+        return []
+
+    dangling: list[str] = []
+    for (_, path), verdict in zip(entries, verdicts, strict=True):
+        if "missing" in verdict:
+            dangling.append(path)
+    return dangling
+
+
+def unstage_paths(repo: Path, paths: list[str]) -> tuple[bool, str]:
+    """Unstage exactly *paths*, leaving the rest of the index untouched.
+
+    Deliberately not ``git reset``: that unstages everything, including work the user
+    intended to stage. Returns ``(ok, message)``.
+    """
+    if not paths:
+        return False, "no paths given"
+    result = subprocess.run(
+        ["git", "restore", "--staged", "--", *paths],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=DEFAULT_TIMEOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True, f"unstaged {len(paths)} path(s)"
+    detail = (result.stderr or result.stdout).strip()
+    return False, detail or f"git restore --staged failed ({result.returncode})"

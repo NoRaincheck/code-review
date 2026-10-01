@@ -435,6 +435,40 @@ def cmd_status(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Unstage the entries an agent left dangling, without touching anything else.
+
+    `git reset` would also unstage work the user meant to stage, so only the affected paths
+    are removed from the index.
+    """
+    repo = _repo_or_fail(args.repo)
+    dangling = git.dangling_index_paths(repo)
+    if not dangling:
+        print("index is intact; nothing to repair")
+        return EXIT_OK
+
+    print(f"{len(dangling)} index entry(s) reference objects that are not in the repository:")
+    for path in dangling[:20]:
+        print(f"  {path}")
+    if len(dangling) > 20:
+        print(f"  ... and {len(dangling) - 20} more")
+
+    if args.dry_run:
+        print("\nre-run without --dry-run to unstage them")
+        return EXIT_OK
+
+    ok, message = git.unstage_paths(repo, dangling)
+    if not ok:
+        return _fail(f"could not unstage: {message}")
+
+    health = git.check_index(repo)
+    print(f"\n{message}")
+    if health.intact:
+        print("index is intact again; your next commit will work")
+        return EXIT_OK
+    return _fail(f"index is still unusable: {health.detail}")
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "run":
         with contextlib.suppress(KeyboardInterrupt):
@@ -624,6 +658,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="daemon and queue status")
     add_repo(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_repair = sub.add_parser(
+        "repair",
+        help="unstage index entries an agent left dangling, so git commit works again",
+    )
+    add_repo(p_repair)
+    p_repair.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be unstaged without changing anything",
+    )
+    p_repair.set_defaults(func=cmd_repair)
 
     p_daemon = sub.add_parser("daemon", help="control the background daemon")
     p_daemon.add_argument("action", choices=["run", "start", "stop", "status"])
