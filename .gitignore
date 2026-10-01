@@ -16,3 +16,8 @@ wheels/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Coverage data
+.coverage
+.coverage.*
+htmlcov/
