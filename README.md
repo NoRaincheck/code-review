@@ -151,8 +151,16 @@ stages your untracked files. With `opencode acp` this was observed to leave the 
 referencing objects that are not in the object store, and the next commit fails with
 `invalid object`. code-review logs an explicit warning when it detects this.
 
-The fix is `git reset`. It unstages the stray entries and restores committing without touching
-any file on disk.
+The fix is:
+
+```bash
+code-review repair --dry-run    # show what would be unstaged
+code-review repair              # unstage exactly those entries
+```
+
+This is deliberately not `git reset`, which would also discard staging you meant to keep. It
+unstages only the entries whose objects are missing, leaves every file on disk untouched, and
+confirms the index is usable again. With no damage it reports that and does nothing.
 
 ## Git worktrees
 

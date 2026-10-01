@@ -448,7 +448,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-366 tests, 73% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+374 tests, 74% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Platform support
 
@@ -532,11 +532,21 @@ error: invalid object 100644 9a896349... for '.codereview.toml'
 fatal: error building trees
 ```
 
-No git command in the trace deletes anything, and the blobs are genuinely absent from
-`.git/objects`. Disabling `gc.auto` and `maintenance.auto` does not help, so git's own
-maintenance is not the cause. What is proven is narrower and worth stating precisely: the
-staging is the agent's, and the corruption follows from it. What removes or redirects the
-objects is not established.
+Root-caused further, because a mitigation needs the mechanism. Polling `.git/objects` every
+20ms across a whole review shows the blob for a newly staged untracked file **never appears
+there at all**, while the index gains an entry pointing at it. So it is not written and then
+deleted; it is never written to this repository. Searching the agent's data directory, `/tmp`
+and `/var/folders` finds it nowhere, consistent with a temporary store that is created and
+destroyed within the review.
+
+That is git's documented object-directory redirection, so the agent is running its snapshot
+`git add --all` with a redirected object store while still updating the real index. Disabling
+`gc.auto` and `maintenance.auto` changes nothing, which rules out git's own maintenance.
+
+Precise statement of confidence: the staging is the agent's and is proven; the object-store
+redirection is the mechanism that fits every observation, but capturing the variable name
+itself would need intercepting the agent's git binary, which it resolves outside `PATH` and
+ignores an injected `GIT_EXEC_PATH`. The mitigation does not depend on knowing the name.
 
 This tool's own git usage is read-only and enumerated by a test, and a bare `reset` in a
 clean repository reproduces nothing.

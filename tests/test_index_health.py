@@ -124,11 +124,108 @@ def test_detection_works_outside_a_repository(tmp_path: Path) -> None:
 
 
 def test_remedy_recovers_the_repository(repo: Path) -> None:
-    """`git reset` must restore committing without losing any file."""
-    (repo / "uncommitted.txt").write_text("mine\n", encoding="utf-8")
-    subprocess.run(["git", "add", "uncommitted.txt"], cwd=repo, check=True, capture_output=True)
+    """Unstaging the dangling entries must restore committing without losing any file."""
+    _stage_and_break(repo, "untracked.txt", "mine\n")
+    assert git.check_index(repo).broken
+
+    ok, _ = git.unstage_paths(repo, git.dangling_index_paths(repo))
+    assert ok
+    assert git.check_index(repo).intact
+    assert (repo / "untracked.txt").read_text(encoding="utf-8") == "mine\n"
+
+
+def _stage_and_break(repo: Path, name: str, content: str) -> str:
+    """Stage a new file, then delete its blob so the index points at nothing."""
+    target = repo / name
+    target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True, capture_output=True)
+    sha = next(
+        line.split()[1]
+        for line in subprocess.run(
+            ["git", "ls-files", "-s", name],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    )
+    blob = repo / ".git" / "objects" / sha[:2] / sha[2:]
+    blob.unlink()
+    return sha
+
+
+def test_dangling_index_paths_names_only_the_broken_entries(repo: Path, tmp_path: Path) -> None:
+    subprocess.run(
+        ["git", "add", "app.py"], cwd=repo, check=True, capture_output=True
+    )  # healthy staged entry
+    _stage_and_break(repo, "broken.txt", "gone\n")
+
+    assert git.dangling_index_paths(repo) == ["broken.txt"]
+
+
+def test_dangling_index_paths_is_empty_on_a_healthy_index(repo: Path) -> None:
+    assert git.dangling_index_paths(repo) == []
+
+
+def test_repair_preserves_the_users_own_staged_work(repo: Path) -> None:
+    """The reason this is not `git reset`: that would discard intended staging."""
+    keep = repo / "my_work.txt"
+    keep.write_text("work in progress\n", encoding="utf-8")
+    subprocess.run(["git", "add", "my_work.txt"], cwd=repo, check=True, capture_output=True)
+    _stage_and_break(repo, "stray.txt", "agent left this\n")
+
+    staged_before = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+    ok, _ = git.unstage_paths(repo, git.dangling_index_paths(repo))
+    assert ok
+
+    staged_after = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+    assert "my_work.txt" in staged_before and "my_work.txt" in staged_after
+    assert "stray.txt" not in staged_after
     assert git.check_index(repo).intact
 
-    subprocess.run(["git", "reset", "-q"], cwd=repo, check=True, capture_output=True)
+
+def test_unstage_of_nothing_is_a_no_op(repo: Path) -> None:
+    ok, message = git.unstage_paths(repo, [])
+    assert not ok
+    assert "no paths" in message
+
+
+def test_repair_reports_an_undamaged_index(repo: Path, tmp_path: Path, capsys) -> None:
+    """End to end through the CLI: nothing to do is success, not an error."""
+    from code_review.cli import main
+
+    assert main(["repair", "--repo", str(repo)]) == 0
+    assert "intact" in capsys.readouterr().out
+
+
+def test_repair_dry_run_changes_nothing(repo: Path) -> None:
+    from code_review.cli import main
+
+    _stage_and_break(repo, "stray.txt", "gone\n")
+    before = (repo / ".git" / "index").read_bytes()
+    assert main(["repair", "--repo", str(repo), "--dry-run"]) == 0
+    assert (repo / ".git" / "index").read_bytes() == before
+    assert git.check_index(repo).broken
+
+
+def test_repair_fixes_a_broken_index(repo: Path) -> None:
+    from code_review.cli import main
+
+    _stage_and_break(repo, "stray.txt", "gone\n")
+    assert git.check_index(repo).broken
+    assert main(["repair", "--repo", str(repo)]) == 0
     assert git.check_index(repo).intact
-    assert (repo / "uncommitted.txt").read_text(encoding="utf-8") == "mine\n"
