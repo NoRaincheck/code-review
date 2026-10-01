@@ -78,7 +78,18 @@ code-review daemon stop          # stop the background daemon
 code-review hook uninstall       # remove the hook
 ```
 
-`show` exits `2` when a commit has no review, so scripts and CI can branch on it.
+`show` resolves a revision like git does: exact sha, then a live revision, then a unique
+abbreviation. An ambiguous abbreviation is an error listing the candidates rather than a
+guess, since showing one commit's review for another is worse than showing none.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | printed a review |
+| `2` | no review for that commit |
+| `3` | that prefix matches several reviewed commits |
+
+Reviews are keyed by sha and the database is not in the repository, so a review outlives the
+commit being rewritten away by a rebase.
 
 ## How it works
 
