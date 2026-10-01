@@ -716,3 +716,111 @@ def test_status_reports_how_many_reviews_never_reviewed(scripted_repo: tuple[Pat
 
     shown = run_cli("status", "--repo", str(repo))
     assert "1 of those completed without producing a verdict" in shown.stdout, shown.stdout
+
+
+# -- what the agent actually did ----------------------------------------------------
+
+
+def _scripted_tools(repo: Path, tmp_path: Path) -> Path:
+    """A script with one of each: a read, a permitted call, a refused one, and two the agent
+    never asked about, which is the case the policy structurally cannot see."""
+    script = tmp_path / "tools.json"
+    script.write_text(
+        json.dumps(
+            {
+                "chunks": ["No issues found."],
+                "tools": [
+                    {"id": "t1", "kind": "read", "title": "calc.py"},
+                    {
+                        "id": "t2",
+                        "kind": "execute",
+                        "title": "git log --oneline -3",
+                        "raw_input": {"command": "git", "args": ["log", "--oneline", "-3"]},
+                        "request_permission": True,
+                    },
+                    {
+                        "id": "t3",
+                        "kind": "execute",
+                        "title": "rm -rf /",
+                        "raw_input": {"command": "rm", "args": ["-rf", "/"]},
+                        "request_permission": True,
+                    },
+                    {
+                        "id": "t4",
+                        "kind": "execute",
+                        "title": "uv sync",
+                        "raw_input": {"command": "uv", "args": ["sync"]},
+                        "request_permission": False,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(script)!r}]\n", encoding="utf-8"
+    )
+    return script
+
+
+def test_show_tools_reports_what_the_agent_ran_and_what_was_refused(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    """The tool log has been recorded all along and never shown to anyone.
+
+    It is also the only place the difference between "asked and refused" and "never asked" is
+    visible, and that difference is the entire basis of the permission check being a backstop
+    rather than a sandbox. It belongs in front of the user for a specific review.
+    """
+    _scripted_tools(repo, tmp_path)
+    assert run_cli("review", second_commit, "--inline", "--repo", str(repo)).returncode == 0
+    assert wait_for_status(repo, second_commit).status is Status.COMPLETED
+
+    shown = run_cli("show", second_commit, "--tools", "--repo", str(repo))
+    assert shown.returncode == 0
+    out = shown.stdout
+    # Two were allowed: the read and the git log. Only the rm was refused, and only the uv
+    # call ran unchecked.
+    assert "4 total, 2 allowed, 1 refused" in out, out
+    assert "1 ran without asking permission" in out, out
+    assert "rm -rf /" in out and "only git is allowed" in out, out
+    assert "uv sync" in out
+    # A permitted git call is neither refused nor flagged as unchecked.
+    assert "git log --oneline" not in out.split("ran without asking")[-1], out
+
+
+def test_show_tools_says_so_when_the_agent_used_no_tools(scripted_repo: tuple[Path, str]) -> None:
+    """Silence here would be ambiguous: no calls, or no log."""
+    repo, _ = scripted_repo
+    sha = git.resolve_sha(repo, "HEAD")
+    run_cli("review", sha, "--inline", "--repo", str(repo))
+    wait_for_status(repo, sha)
+
+    shown = run_cli("show", sha, "--tools", "--repo", str(repo))
+    assert "made no tool calls" in shown.stdout, shown.stdout
+
+
+def test_show_tools_does_not_change_the_default_output(
+    repo: Path, second_commit: str, tmp_path: Path
+) -> None:
+    _scripted_tools(repo, tmp_path)
+    run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    wait_for_status(repo, second_commit)
+
+    plain = run_cli("show", second_commit, "--repo", str(repo))
+    assert "total," not in plain.stdout, "the tool log leaked into the default view"
+    assert "No issues found." in plain.stdout
+
+
+def test_show_tools_works_for_a_failed_review(repo: Path, second_commit: str) -> None:
+    """A failure is exactly when knowing what the agent tried is most useful."""
+    (repo / ".codereview.toml").write_text(
+        f"review_agent = [{sys.executable!r}, {FAKE_AGENT!r}, {str(Path('/nonexistent.json'))!r}]\n",
+        encoding="utf-8",
+    )
+    result = run_cli("review", second_commit, "--inline", "--repo", str(repo))
+    assert result.returncode != 0
+
+    shown = run_cli("show", second_commit, "--tools", "--repo", str(repo))
+    assert shown.returncode in (0, 1)
+    assert "no tool calls" in shown.stdout, shown.stdout

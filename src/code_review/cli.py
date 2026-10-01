@@ -318,7 +318,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     database = _open_db(repo)
     try:
         review = _find_review(database, repo, args.sha)
-        return _render(review, raw=args.raw)
+        return _render(review, raw=args.raw, tools=args.tools)
     except AmbiguousRevision as exc:
         print(f"code-review: {exc}", file=sys.stderr)
         for candidate in exc.candidates:
@@ -335,7 +335,57 @@ def cmd_show(args: argparse.Namespace) -> int:
         database.close()
 
 
-def _render(review: Any, *, raw: bool) -> int:
+def _render_tool_log(review: Any) -> int:
+    """What the agent actually did, and which of it was allowed.
+
+    The tool log has been recorded all along and never shown to anyone, which made the effort
+    spent keeping temporary paths out of it invisible. More usefully, it is the only place the
+    distinction between "the agent asked and we said no" and "the agent never asked" is
+    visible. That difference is the whole basis of the permission backstop being a backstop, so
+    it belongs in front of the user for a specific review rather than only in the README.
+
+    Counted rather than left to be inferred, because a review of twenty tool calls where three
+    were refused reads very differently from one where twenty ran unchecked.
+    """
+    entries = review.tool_log or []
+    if not entries:
+        print(f"code-review: the agent made no tool calls for {review.short_sha}")
+        return EXIT_OK
+
+    asked_allowed = [e for e in entries if e.get("decision") == "allow"]
+    refused = [e for e in entries if e.get("decision") == "deny"]
+    unasked = [e for e in entries if e.get("decision") is None]
+
+    print(f"tool calls for {review.short_sha} ({review.agent or 'unknown agent'}):")
+    print(f"  {len(entries)} total, {len(asked_allowed)} allowed, {len(refused)} refused")
+    print(
+        f"  {len(unasked)} ran without asking permission, and so were never subject to the policy"
+    )
+    if refused:
+        print()
+        print("refused:")
+        for entry in refused:
+            reason = entry.get("reason") or "no reason given"
+            print(f"  - {_one_line(entry.get('title'))}\n      {reason}")
+    if unasked:
+        print()
+        print("ran without asking (not checked against the policy):")
+        for entry in unasked:
+            print(f"  - {_one_line(entry.get('title'))}")
+    return EXIT_OK
+
+
+def _one_line(text: object, width: int = 100) -> str:
+    collapsed = " ".join(str(text or "").split())
+    return collapsed if len(collapsed) <= width else collapsed[: width - 3] + "..."
+
+
+def _render(review: Any, *, raw: bool, tools: bool = False) -> int:
+    # Checked before the failure exit below, because a review that died partway through is
+    # exactly the one whose tool log is worth reading.
+    if tools:
+        return _render_tool_log(review)
+
     if review.status == Status.FAILED:
         print(
             f"code-review: review of {review.short_sha} failed: {review.error}",
@@ -688,6 +738,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("sha", nargs="?", help="commit (default: HEAD)")
     add_repo(p_show)
     p_show.add_argument("--raw", action="store_true", help="markdown only, no header")
+    p_show.add_argument(
+        "--tools",
+        action="store_true",
+        help="list what the agent did: every tool call, and which were refused",
+    )
     p_show.set_defaults(func=cmd_show)
 
     p_list = sub.add_parser("list", help="list recent reviews")

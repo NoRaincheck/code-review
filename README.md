@@ -69,6 +69,7 @@ during a review.
 code-review show                 # review of HEAD
 code-review show abc1234         # review of one commit
 code-review show --raw           # markdown only, for pipes and editors
+code-review show HEAD --tools    # what the agent did, and what was refused
 code-review list                 # recent reviews
 code-review list --status failed
 code-review review HEAD --wait   # review now, block until done
@@ -83,6 +84,11 @@ code-review hook uninstall       # remove the hook
 `show` resolves a revision like git does: exact sha, then a live revision, then a unique
 abbreviation. An ambiguous abbreviation is an error listing the candidates rather than a
 guess, since showing one commit's review for another is worse than showing none.
+
+`show --tools` lists what the agent actually did: every tool call, which were refused and why,
+and how many ran **without asking** — which is to say without ever being subject to the policy.
+That last number is the per-review version of the caveat in [Safety](#safety), and it is worth
+reading when a review comes back weaker than it should be.
 
 | Exit | Meaning |
 | --- | --- |
