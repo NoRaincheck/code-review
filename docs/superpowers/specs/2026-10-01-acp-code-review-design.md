@@ -448,7 +448,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-359 tests, 73% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+366 tests, 73% statement coverage, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Platform support
 
@@ -507,6 +507,50 @@ review_agent = [
 
 This is the only reliable containment for a hostile repository, and it is what should be
 used when reviews run over contributions from people you do not trust.
+
+### Observed: a reviewing agent can leave the repository uncommittable
+
+Found by running a genuinely hostile repository through the whole pipeline rather than by
+constructing injection strings. The agent handled the hostility correctly, and the failure was
+in the tool.
+
+`opencode acp` takes a repository snapshot before reviewing, and that snapshot runs
+`git add --all`. Captured with `GIT_TRACE`:
+
+```
+trace: built-in: git add --all --sparse --pathspec-from-file=- --pathspec-file-nul
+```
+
+So every review stages whatever is untracked and not ignored — including `.codereview.toml`
+and the `.gitignore` line `code-review init` wrote. The staging is deterministic.
+
+Whether the *objects* behind those entries survive is not. In three consecutive trials, two
+left the index referencing blobs absent from the object store, and the next `git commit` failed:
+
+```
+error: invalid object 100644 9a896349... for '.codereview.toml'
+fatal: error building trees
+```
+
+No git command in the trace deletes anything, and the blobs are genuinely absent from
+`.git/objects`. Disabling `gc.auto` and `maintenance.auto` does not help, so git's own
+maintenance is not the cause. What is proven is narrower and worth stating precisely: the
+staging is the agent's, and the corruption follows from it. What removes or redirects the
+objects is not established.
+
+This tool's own git usage is read-only and enumerated by a test, and a bare `reset` in a
+clean repository reproduces nothing.
+
+The consequence for a user is that their next commit fails with an error that mentions nothing
+about code review. Two mitigations:
+
+- **Detection.** `git.check_index` runs `git write-tree`, which is the step `git commit`
+  performs, so it fails identically in one cheap call. The worker runs it after every review
+  and logs the remedy. Limitation, pinned by a test: when every staged path is already in a
+  committed tree, git reuses that tree and never needs the blob, so a missing object goes
+  unseen there.
+- **The remedy is cheap and lossless.** `git reset` unstages and restores committing without
+  touching any file. Verified.
 
 ### Observed: an agent can damage the checkout without asking
 

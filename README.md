@@ -144,6 +144,16 @@ of failing with a bare import error. The rest works: `show`, `list`, `doctor`, a
 `review --inline` all run without a daemon, so reviewing a single commit on Windows means
 using `--inline`.
 
+## If `git commit` starts failing with "invalid object"
+
+Some agents take a repository snapshot before reviewing, and that runs `git add --all`, which
+stages your untracked files. With `opencode acp` this was observed to leave the index
+referencing objects that are not in the object store, and the next commit fails with
+`invalid object`. code-review logs an explicit warning when it detects this.
+
+The fix is `git reset`. It unstages the stray entries and restores committing without touching
+any file on disk.
+
 ## Git worktrees
 
 The hook path is resolved by git, so `code-review init` works from any worktree and installs

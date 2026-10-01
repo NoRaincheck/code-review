@@ -190,3 +190,39 @@ def is_ancestor(repo: Path, maybe_ancestor: str, descendant: str) -> bool:
     except subprocess.SubprocessError:
         return False
     return result.returncode == 0
+
+
+@dataclass(frozen=True, slots=True)
+class IndexHealth:
+    """Whether the index can still produce a tree, which is what committing requires."""
+
+    intact: bool
+    detail: str = ""
+
+    @property
+    def broken(self) -> bool:
+        return not self.intact
+
+
+def check_index(repo: Path) -> IndexHealth:
+    """Check that every object the index references still exists.
+
+    ``git write-tree`` performs exactly the step ``git commit`` performs, so it fails the same
+    way and for the same reason, in one cheap read-only call.
+
+    This exists because a reviewing agent may leave the index referencing objects that were
+    never written to this repository's object store. The user's next ``git commit`` then fails
+    with ``invalid object``, which is cryptic and disconnected from the review that caused it.
+    """
+    result = subprocess.run(
+        ["git", "write-tree"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=DEFAULT_TIMEOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        return IndexHealth(intact=True)
+    detail = (result.stderr or result.stdout).strip().splitlines()
+    return IndexHealth(intact=False, detail=detail[0] if detail else "git write-tree failed")

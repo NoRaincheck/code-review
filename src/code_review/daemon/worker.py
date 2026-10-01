@@ -204,6 +204,8 @@ class Worker:
             self.stats.failed += 1
             log.warning("review of %s failed: %s", review.short_sha, exc)
             return
+        finally:
+            self._warn_if_index_damaged(repo, review)
 
         database.complete(
             review.id,
@@ -222,3 +224,24 @@ class Worker:
                 outcome.stop_reason,
             )
         log.info("review of %s complete", review.short_sha)
+
+    @staticmethod
+    def _warn_if_index_damaged(repo: Path, review: Review) -> None:
+        """Tell the user if the review left their repository unable to commit.
+
+        Some agents stage files as a side effect of taking a snapshot. If the objects those
+        entries point at are not in this repository's object store, the next ``git commit``
+        fails with ``invalid object`` and nothing connects that failure to the review. The
+        remedy is cheap and loses nothing, so it is worth saying out loud.
+        """
+        health = git.check_index(repo)
+        if health.intact:
+            return
+        log.error(
+            "review of %s left the git index unusable: %s\n"
+            "  The agent appears to have staged files whose objects are missing from the\n"
+            "  repository. Unstage them to restore committing: git reset\n"
+            "  Nothing is lost: this only unstages, and no file on disk is touched.",
+            review.short_sha,
+            health.detail,
+        )
