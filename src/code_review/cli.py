@@ -150,7 +150,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"repository:  {repo}")
     print(f"database:    {database_path(repo)}")
     print(f"hook:        {hook_state} ({hook_path})")
-    print(f"gitignore:   {'updated' if gitignored else 'already ignored'}")
+    if gitignored:
+        gitignore_state = "updated (a leftover state directory was there to ignore)"
+    elif paths.state_dir(repo).exists():
+        gitignore_state = "already ignored"
+    else:
+        gitignore_state = "not needed (nothing is written to the working tree)"
+    print(f"gitignore:   {gitignore_state}")
     print(f"config:      {config_state}")
     if not config.agent:
         print()
@@ -647,7 +653,9 @@ def build_parser() -> argparse.ArgumentParser:
     def add_repo(p: argparse.ArgumentParser) -> None:
         p.add_argument("--repo", help="path inside the repository (default: cwd)")
 
-    p_init = sub.add_parser("init", help="install the post-commit hook and create state")
+    p_init = sub.add_parser(
+        "init", help="install the post-commit hook and create the review database"
+    )
     add_repo(p_init)
     p_init.add_argument("--force", action="store_true", help="wrap an existing post-commit hook")
     p_init.set_defaults(func=cmd_init)

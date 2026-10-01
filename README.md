@@ -20,9 +20,9 @@ code-review init         # in the repository you want reviewed
 
 `init` installs a `post-commit` hook and creates the review database. It refuses to overwrite a
 `post-commit` hook it did not write unless you pass `--force`. All state lives under the
-repository's shared git directory, not in your working tree, so there is nothing to commit. A
-`.gitignore` entry for `.codereview/` is still added, purely so a directory left behind by an
-older version stays ignored.
+repository's shared git directory, so nothing is written to your working tree and `.gitignore`
+is left alone. The one exception is an upgrade: if a `.codereview/` directory is already there
+from an older version, `init` adds it to `.gitignore` so the leftover stays ignored.
 
 ## Configure an agent
 

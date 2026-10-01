@@ -198,12 +198,35 @@ def test_is_installed_reflects_state(repo: Path) -> None:
 # -- gitignore -------------------------------------------------------------
 
 
-def test_ensure_gitignore_adds_the_state_dir(repo: Path) -> None:
+def _leave_a_state_dir(repo: Path) -> Path:
+    """Recreate what an earlier version of this tool left in a working tree."""
+    state = paths.state_dir(repo)
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "reviews.db").write_text("x", encoding="utf-8")
+    return state
+
+
+def test_ensure_gitignore_ignores_a_leftover_state_dir(repo: Path) -> None:
+    _leave_a_state_dir(repo)
     assert hook.ensure_gitignore(repo) is True
     assert ".codereview/" in (repo / ".gitignore").read_text(encoding="utf-8")
 
 
+def test_ensure_gitignore_does_nothing_when_there_is_nothing_to_ignore(repo: Path) -> None:
+    """A fresh install must not edit a file the user never asked us to touch.
+
+    The database moved under the shared git directory, so there is nothing in the working tree
+    to ignore. Writing the entry anyway would mean editing `.gitignore` on the strength of a
+    directory that will not exist, and would contradict what `init` reports about leaving the
+    working tree alone.
+    """
+    assert not paths.state_dir(repo).exists(), "precondition"
+    assert hook.ensure_gitignore(repo) is False
+    assert not (repo / ".gitignore").exists(), "a .gitignore was created for nothing"
+
+
 def test_ensure_gitignore_is_idempotent(repo: Path) -> None:
+    _leave_a_state_dir(repo)
     hook.ensure_gitignore(repo)
     first = (repo / ".gitignore").read_text(encoding="utf-8")
     assert hook.ensure_gitignore(repo) is False
@@ -211,6 +234,7 @@ def test_ensure_gitignore_is_idempotent(repo: Path) -> None:
 
 
 def test_gitignore_is_appended_to_existing_content(repo: Path) -> None:
+    _leave_a_state_dir(repo)
     gitignore = repo / ".gitignore"
     gitignore.write_text("*.pyc\n", encoding="utf-8")
     hook.ensure_gitignore(repo)
@@ -220,6 +244,7 @@ def test_gitignore_is_appended_to_existing_content(repo: Path) -> None:
 
 
 def test_gitignore_respects_a_missing_trailing_newline(repo: Path) -> None:
+    _leave_a_state_dir(repo)
     gitignore = repo / ".gitignore"
     gitignore.write_text("*.pyc", encoding="utf-8")
     hook.ensure_gitignore(repo)
@@ -229,9 +254,8 @@ def test_gitignore_respects_a_missing_trailing_newline(repo: Path) -> None:
 
 
 def test_state_dir_is_actually_ignored_by_git(repo: Path) -> None:
+    _leave_a_state_dir(repo)
     hook.ensure_gitignore(repo)
-    paths.state_dir(repo).mkdir(parents=True, exist_ok=True)
-    (paths.state_dir(repo) / "reviews.db").write_text("x", encoding="utf-8")
     ignored = subprocess.run(
         ["git", "check-ignore", ".codereview/reviews.db"],
         cwd=repo,

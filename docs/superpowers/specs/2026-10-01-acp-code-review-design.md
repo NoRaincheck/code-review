@@ -90,13 +90,21 @@ detached and retries.
 
 ### D6 — Storage location: one SQLite database per repository
 
-**Chosen:** `.codereview/reviews.db` inside the repo, auto-gitignored.
+**Chosen:** one SQLite file under the repository's *shared* git directory, at
+`<git common dir>/codereview/reviews.db`, resolved through `git rev-parse --git-common-dir`.
+
+**Originally:** `.codereview/reviews.db` inside the working tree, auto-gitignored. Correct as
+a per-worktree store and wrong as a per-*repository* one: the same commit reviewed from two
+worktrees produced two reviews, and `show` in one worktree could not see another's. Sharing it
+also moved the file out of the working tree entirely, so nothing has to be gitignored.
 
 **Rejected:** single global `~/.codereview/reviews.db` (enables cross-repo listing, but a
-shared mutable file outside the repo complicates parallel worktrees of the same repo);
-per-repo plus a mirrored global index (two things to keep consistent).
+shared mutable file outside the repo is worse still, and the common git dir already scopes by
+repository); per-repo plus a mirrored global index (two things to keep consistent).
 
-**Consequence:** no cross-repo `code-review list` without `cd`-ing into each repo.
+**Consequence:** no cross-repo `code-review list` without `cd`-ing into each repo. Within one
+repository, every worktree shares one history, and concurrent writes were already safe: WAL,
+`BEGIN IMMEDIATE`, a busy timeout, and a unique constraint on the sha.
 
 ### D7 — Diff delivery: inline diff plus read-only git allowlist
 
@@ -155,11 +163,11 @@ only thing that works. Two consequences, both verified live:
 
 - **The hook is shared.** Installing from any worktree installs into the repository's common
   hooks directory, so every worktree of the repository gets reviews from the one hook.
-- **The review database is per-worktree.** `.codereview/` sits inside each worktree, so
-  `show` in one worktree does not see reviews produced in another. Reviews are keyed by
-  commit, which is shared across worktrees, so the same commit can be reviewed once per
-  worktree. Accepted for v1: a shared store would need to key on the common directory and
-  handle two worktrees reviewing the same commit concurrently.
+- **The review database is shared by all worktrees.** It lives under the common git
+  directory, so `show` and `list` see the same history from any worktree and a commit is
+  reviewed once, not once per worktree. This replaced a per-worktree store, whose two costs
+  were duplicate reviews and an invisible history. Two worktrees racing to review one commit
+  are already handled: the row is unique on the sha, so the second finds the first.
 
 ## 5. Module boundaries
 
@@ -189,7 +197,7 @@ an agent. The ACP dependency is quarantined in `agent/`.
 
 ## 6. Data model
 
-SQLite, WAL mode, one file per repository at `<repo>/.codereview/reviews.db`.
+SQLite, WAL mode, one file per repository at `<git common dir>/codereview/reviews.db`.
 
 ```sql
 CREATE TABLE reviews (
@@ -359,12 +367,13 @@ presenting a truncated review as complete.
 ## 11. CLI surface
 
 ```
-code-review init [--force]        # install hook, create state dir, gitignore
+code-review init [--force]        # install hook, create the database under the common git dir
 code-review enqueue [sha]         # hook entry point; resolves HEAD, never fails
 code-review review <sha> [--force] [--agent CMD ...] [--timeout N] [--wait] [--inline]
 code-review show [sha] [--raw]    # print markdown; defaults to HEAD
 code-review list [--status S] [--limit N] [--json]
-code-review status                # daemon liveness + queue depth
+code-review status                # daemon liveness, queue depth, and how many reviews warned
+code-review repair [--dry-run]    # unstage only the index entries an agent left dangling
 code-review daemon start|stop|status|run
 code-review hook install|uninstall|status
 code-review doctor [--probe]     # check installation; --probe proves the agent speaks ACP

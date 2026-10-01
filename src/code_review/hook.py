@@ -187,7 +187,22 @@ def uninstall(repo: Path) -> bool:
 
 
 def ensure_gitignore(repo: Path) -> bool:
-    """Add the state directory to .gitignore. Returns True if the file changed."""
+    """Keep a leftover state directory ignored, but only bother if there is one.
+
+    The database moved under the shared git directory, so this tool no longer writes anything
+    into the working tree. A fresh install therefore has nothing to ignore, and adding the
+    entry anyway means editing a file the user never asked us to touch, on the strength of a
+    directory that will not exist. That also contradicts what `init` and the README say about
+    the working tree staying clean.
+
+    A leftover from an earlier version is a real case, though, and a stale
+    ``.codereview/reviews.db`` sitting untracked in someone's tree is worse than a redundant
+    ignore rule. So the entry is added exactly when there is something to ignore.
+
+    Returns True if the file changed.
+    """
+    if not paths.state_dir(repo).exists():
+        return False
     gitignore = repo / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
     if ".codereview/" in existing.splitlines():
