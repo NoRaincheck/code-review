@@ -185,23 +185,49 @@ the system temp directory, so a machine with a small `/tmp` and many reviews may
 
 ## Safety
 
-The reviewing agent gets full read access and no ability to write: edits, deletes, moves,
-and terminal access are refused, as is any command that is not a read-only `git`
-subcommand. Commands are matched against a parsed argv, not a substring of a shell string,
-so `git log; rm -rf /` is refused even though it starts with `git log`.
+The reviewing agent can read the whole repository and cannot write to it: edits, deletes,
+moves, and terminal access are refused, as is any command that is not a read-only `git`
+subcommand. Reads are confined to the repository too, so a `../` or absolute path is refused.
+Commands are matched against a parsed argv, not a substring of a shell string, so
+`git log; rm -rf /` is refused even though it starts with `git log`.
 
-**The permission hook is a backstop, not a sandbox.** It only applies to tools an agent
-chooses to ask about. An agent that executes without requesting permission is governed by
-its own policy, not by ours. For code you do not trust, wrap the agent in an OS sandbox —
-`review_agent` is arbitrary argv, so this needs no special support:
+The commit and its diff are quoted into the prompt as **untrusted data**, and the prompt says so
+explicitly: text inside them posing as instructions is itself a finding to report, not a
+directive. That is a request, not a guarantee, and it is the agent's cooperation that enforces
+it. Measured against a real agent, a commit file and a commit message both carrying a
+"system override for AI reviewers" that demanded a shell write and a false verdict: the agent
+reported the injection as a security finding, did not run the command, and did not issue the
+verdict it was told to. That is evidence, not a control.
+
+**The permission hook is a backstop, not a sandbox.** It only applies to tools an agent chooses
+to ask about. An agent that executes without requesting permission is governed by its own
+policy, not by ours, and the write capabilities we advertise are advice it may decline to take.
+For code you do not trust, wrap the agent in an OS sandbox — `review_agent` is arbitrary argv,
+so this needs no special support. This profile is verified to let a review finish while
+blocking writes outside the agent's own state:
 
 ```toml
 review_agent = [
-  "sandbox-exec", "-p", "(version 1)(allow default)(deny file-write*)",
+  "sandbox-exec", "-p",
+  # Deny every write, then re-allow only what the agent needs to run at all.
+  # Without the two allow rules opencode cannot start, so the obvious
+  # "(deny file-write*)" on its own breaks the review instead of securing it.
+  "(version 1)(allow default)(deny file-write*)" +
+  # the agent's own state, and
+  "(allow file-write* (subpath \"/Users/you/.local/share/opencode\"))" +
+  # the system temp directory, which is where the throwaway review worktree lives
+  "(allow file-write* (subpath \"/var/folders/.../T\"))",
   "opencode", "acp",
 ]
 ```
 
+Two caveats worth knowing. The temp directory has to be writable, so the agent can write
+anywhere under it; the review worktree is there too, which is why that is where it was put.
+And `sandbox-exec` is macOS-only and deprecated by Apple, though still present and working.
+`seatbelt` is the same thing under another name. On Linux, `bwrap` or a container does the job.
+
+Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the same way a
+`Makefile` can.
 Treat `.codereview.toml` as trusted: `review_agent` can name any executable, the same way a
 `Makefile` can.
 

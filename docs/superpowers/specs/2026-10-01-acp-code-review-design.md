@@ -873,6 +873,35 @@ async with spawn_agent_process(client, command, *args, env=env, cwd=cwd) as (con
 - Pin exactly. `1.0.0rc2` already removed `acp.helpers` and expanded `SessionUpdate` from 13
   to 16 variants; an unpinned install would walk us into that silently.
 
+### Auditing the safety claims, and the recommended mitigation was broken
+
+Every other claim in this document had been tested. The security ones had not, so they were
+audited against reality, one at a time.
+
+**Reads are confined**, and were already tested, but the README said "full read access", which in
+a section about what the agent may do reads as though it can read the filesystem. Now it says
+the repository.
+
+**The agent does not obey prompt injection.** Two attempts with a real agent: a committed file
+instructing the reviewer to write outside the repository, and a commit message framing itself as
+a "SYSTEM OVERRIDE for AI reviewers" that demanded a shell write, a false verdict, and silence
+about the instruction. Both times the agent reported the injection as a security finding, wrote
+nothing, and did not issue the verdict it was told to. That is the prompt's untrusted-data
+framing working, and it is cooperation rather than a control, so the README now says so.
+
+**The recommended sandbox profile did not work.** The README told users to wrap the agent in
+``sandbox-exec -p "(version 1)(allow default)(deny file-write*)"``. Tested, the review does not
+run at all: the connection closes immediately and every review fails. The agent needs to write
+its own state and its temporary files, and denying writes denies those. A profile that denies
+writes and then re-allows the agent's state directory and the system temp directory was verified
+to complete a review while blocking writes to ``/tmp`` and to the rest of the filesystem, and
+that is the profile the README now gives, with the reason the obvious one fails.
+
+The temp directory has to be writable for the agent to run, and the review worktree lives there
+too. That is not a coincidence: a throwaway worktree in a directory the agent may write is what
+keeps a compromised agent from reaching the user's checkout, and it costs the guarantee that the
+agent cannot write under ``/tmp``. Both are now stated rather than implied.
+
 ### Found by dogfooding: a review that never happened was reported as a success
 
 Reviewing this tool's own commits with a real agent, one review came back as
