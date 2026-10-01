@@ -182,6 +182,10 @@ class Worker:
         log.info("reviewing %s in %s", review.short_sha, repo)
 
         config = config_module.load_config(repo)
+        if config.agent is not None:
+            # Name the agent before the review starts, so `show` on an in-flight review
+            # says which one is working rather than reporting it as unknown.
+            database.set_agent(review.id, config.agent.label)
         runner = ReviewRunner(config, repo, timeout_seconds=self._timeout_seconds)
         commit = git.load_commit(repo, review.sha, max_diff_bytes=config.max_diff_bytes)
 

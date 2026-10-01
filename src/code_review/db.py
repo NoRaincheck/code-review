@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -111,36 +111,79 @@ def _row_to_review(row: sqlite3.Row) -> Review:
 
 
 class Database:
-    """Thin, synchronous SQLite wrapper. Not shared across threads."""
+    """Thin, synchronous SQLite wrapper. Not shared across threads.
+
+    Opening an existing database does not write to it. That matters because the daemon
+    holds the write lock for the duration of a review, and ``code-review show`` is a
+    read-only command that must keep working while a review is in flight. WAL lets readers
+    proceed during a write, but only if opening does not itself need a write lock, so the
+    schema and the version marker are applied only when they are missing or stale.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # Set before anything that can fail, so a partially constructed object does not
+        # raise a confusing AttributeError from __del__ and bury the real error. A None
+        # here means the connection was never opened, so there is nothing to close.
+        self._closer: Callable[[], None] | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
+
         self._conn = sqlite3.connect(path, isolation_level=None, timeout=15.0)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA busy_timeout=15000")
-        self._conn.executescript(SCHEMA)
-        self._conn.execute(
-            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (SCHEMA_VERSION,),
-        )
         # A daemon can open many repositories, and a reference cycle through the
         # sqlite3.Connection keeps them from being collected promptly. Closing on
         # collection avoids leaking file descriptors and unraisable ResourceWarnings.
-        self._finalizer = weakref.finalize(self, self._conn.close)
+        self._closer = weakref.finalize(self, self._conn.close)
+
+        self._conn.execute("PRAGMA busy_timeout=15000")
+        if self._has_table("reviews"):
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        else:
+            # A fresh database still needs its journal mode set; setting WAL takes a write
+            # lock, which is fine because nothing else can be using the file yet.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(SCHEMA)
+
+        self._record_schema_version()
+
+    def _has_table(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def _record_schema_version(self) -> None:
+        """Store the schema version, if it is missing or out of date.
+
+        Advisory metadata. A failure here is not fatal: the schema itself is already
+        correct, and the next open retries. Letting it raise would mean a concurrent writer
+        could stop the CLI from reading reviews at all.
+        """
+        try:
+            row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if row is not None and row["value"] == SCHEMA_VERSION:
+                return
+            self._conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (SCHEMA_VERSION,),
+            )
+        except sqlite3.OperationalError:
+            pass
 
     @classmethod
     def for_repo(cls, repo: Path) -> Database:
         return cls(paths.db_path(repo))
 
     def close(self) -> None:
-        if self._finalizer.alive:
-            self._finalizer()
-        else:
-            self._conn.close()
+        """Close the connection. Safe to call twice, and on a failed construction."""
+        closer = self._closer
+        if closer is None:
+            # __init__ failed before the connection existed; nothing to close.
+            return
+        # weakref.finalize is idempotent: the second call is a no-op.
+        closer()
 
     def __enter__(self) -> Database:
         return self
@@ -286,6 +329,18 @@ class Database:
                 "UPDATE reviews SET status=?, markdown=COALESCE(?, markdown), "
                 "agent=COALESCE(?, agent), stop_reason='cancelled', finished_at=? WHERE id=?",
                 (Status.CANCELLED.value, markdown, agent, _now(), review_id),
+            )
+
+    def set_agent(self, review_id: int, agent: str) -> None:
+        """Record which agent is working on a review.
+
+        Written before the review runs rather than after it finishes, so that `show` on an
+        in-flight review names the agent instead of reporting it as unknown. That is the
+        first thing worth knowing about a review that is taking too long.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE reviews SET agent=COALESCE(agent, ?) WHERE id=?", (agent, review_id)
             )
 
     # -- retrieval --------------------------------------------------------

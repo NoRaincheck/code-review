@@ -175,11 +175,13 @@ Each unit is independently understandable and testable.
 | `paths.py` | Daemon socket, pid file, log file, per-repo state dir. | — |
 | `agent/policy_client.py` | The `acp.interfaces.Client` implementation. | policy |
 | `agent/runner.py` | Spawn agent, drive one turn, collect markdown. **Only module importing ACP.** | policy, prompt |
+| `agent/probe.py` | ACP handshake probe behind `doctor --probe`. | policy_client |
 | `daemon/protocol.py` | Newline-delimited JSON request/response framing. | — |
+| `daemon/client.py` | Socket client used by the hook and the CLI. | protocol, supervisor |
 | `daemon/server.py` | Socket listener, dispatch, `serve_forever`. | protocol |
 | `daemon/worker.py` | The queue and the single review loop. | db, git, config, agent |
 | `daemon/supervisor.py` | Detached spawn, stale-socket reaping. | paths |
-| `hook.py` | Hook script generation, install, uninstall. | paths |
+| `hook.py` | Hook script generation, install, uninstall. | paths, git |
 | `cli.py` | Argparse dispatch. | everything |
 
 `prompt.py` and `policy.py` are pure, so they are exhaustively unit-testable without spawning
@@ -218,6 +220,17 @@ queue, so a daemon restart simply picks up whatever is still `queued` or `runnin
 
 A row stuck in `running` after a crash is reset to `queued` at daemon startup, since no
 process is working on it any more.
+
+`agent` is written when the review *starts*, not when it finishes, so `show` on an
+in-flight review names the agent that is chewing on it.
+
+**Opening an existing database must not write to it.** The daemon holds the write lock for
+the whole of a review, and `code-review show` is a read-only command that has to keep
+working during one. WAL allows that, but only if the reader does not itself need a write
+lock, so the schema is created only when the `reviews` table is absent and the schema
+version is recorded only when stale or missing. Measured before and after this was fixed:
+`show` during a review took 16.1s and then failed with `database is locked`; now it returns
+in 0.5s.
 
 ## 7. Config
 
@@ -291,13 +304,13 @@ presenting a truncated review as complete.
 
 | Situation | Behavior |
 | --- | --- |
-| Daemon not running | `enqueue` spawns it detached, retries up to 10s, else logs and exits 0 |
-| Socket exists but daemon is dead | Supervisor reaps a stale socket after failing a connect |
+| Daemon not running | `enqueue` spawns it detached, waits up to 15s for the socket, else logs and exits 0 |
+| Socket exists but daemon is dead | Supervisor reaps it, on the evidence that the pid file names no live process |
 | Agent binary missing | Review fails with the exec error, hook unaffected |
 | Agent hangs | Timeout, cancel, keep partial markdown |
 | Agent requests a denied permission | Denied, review continues |
 | No `review_agent` configured | Review fails with a clear config error naming the key |
-| DB locked | Busy timeout, then fail the review, not the commit |
+| DB held by a concurrent write | Reads proceed (WAL); writes wait out a 15s busy timeout, then fail the review, never the commit |
 
 ## 11. CLI surface
 
@@ -379,7 +392,7 @@ model call to check.
   with correct `file:line` citations, and refused two separate prompt-injection payloads
   without side effects. See §13 for what that run also revealed about permission coverage.
 
-268 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
+272 tests, `ruff check` clean, `ruff format` clean, `mypy --strict` clean.
 
 ## 13. Security model
 
@@ -498,7 +511,13 @@ Recorded because each is a trap that looks correct in review.
    `"review failed"` and its markdown discarded. `TimeoutError` is now re-raised unwrapped,
    the failure path records the real error, and there are tests for the timeout, the retained
    partial markdown, and the retained tool log.
-12. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
+12. **`code-review show` blocked for 16s and failed during any review.** `Database.__init__`
+   unconditionally ran the schema script and a metadata write, so even a read-only command
+   needed the write lock the daemon holds for the duration of a review. Measured, then
+   fixed so an existing database is only written when the schema or version marker is
+   actually missing. The same constructor failure also left `__del__` raising an
+   `AttributeError` over the real error, because the close handle was assigned last.
+13. **Daemons outlived their own pid file.** `stop_daemon` identifies its target by reading the
    pid file, so a daemon whose `CODEREVIEW_HOME` was deleted could not be stopped by name and
    lingered forever. A test run leaked roughly a hundred of them. Fixed two ways: an orphan
    watchdog in the daemon that exits when its pid file or socket disappears, and a `reap()`

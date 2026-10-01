@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -250,3 +251,95 @@ def test_reopening_an_old_database_is_tolerated(tmp_path: Path) -> None:
         assert counts["queued"] == 1
     finally:
         db.close()
+
+
+# -- concurrent access -----------------------------------------------------
+
+
+def test_reading_works_while_another_connection_holds_the_write_lock(
+    tmp_path: Path,
+) -> None:
+    """`show` and `list` must not block behind an in-flight review.
+
+    The daemon holds the write lock for the whole review. If opening the database wrote to
+    it, every read-only command would block for the busy timeout and then fail, which is
+    the tool's primary command.
+    """
+    path = tmp_path / "reviews.db"
+    with Database(path) as db:
+        db.enqueue("a" * 40, "main")
+
+    blocker = sqlite3.connect(path, isolation_level=None, timeout=1)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        blocker.execute(
+            "INSERT INTO reviews(sha, status, created_at) VALUES(?, 'running', 'now')",
+            ("b" * 40,),
+        )
+
+        started = time.monotonic()
+        db = Database(path)
+        try:
+            assert time.monotonic() - started < 1.0, "opening a database took a write lock"
+            # WAL readers see the last committed snapshot, so the blocker's uncommitted
+            # row is invisible. The point is that the read proceeds at all.
+            assert db.get("a" * 40) is not None
+            assert len(db.list()) >= 1
+        finally:
+            db.close()
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+
+def test_writing_still_reports_a_locked_database(tmp_path: Path) -> None:
+    """Reads tolerate a concurrent writer; writes must still surface the conflict."""
+    path = tmp_path / "reviews.db"
+    with Database(path) as db:
+        db.enqueue("a" * 40, "main")
+
+    blocker = sqlite3.connect(path, isolation_level=None, timeout=1)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        blocker.execute(
+            "INSERT INTO reviews(sha, status, created_at) VALUES(?, 'running', 'now')",
+            ("b" * 40,),
+        )
+        db = Database(path)
+        db._conn.execute("PRAGMA busy_timeout=250")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                db.enqueue("c" * 40, "main")
+        finally:
+            db.close()
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+
+def test_close_is_safe_twice_and_after_a_failed_construction(tmp_path: Path) -> None:
+    """A failed construction must not leave __del__ raising over the real error."""
+    db = Database(tmp_path / "reviews.db")
+    db.close()
+    db.close()  # idempotent
+
+    # Simulate a constructor that failed after the attribute was initialised.
+    partial = Database.__new__(Database)
+    partial.path = tmp_path / "never" / "reviews.db"
+    partial._closer = None
+    partial.close()  # must not raise
+
+
+def test_schema_is_created_for_a_fresh_database(tmp_path: Path) -> None:
+    path = tmp_path / "new.db"
+    with Database(path) as db:
+        db.enqueue("a" * 40, "main")
+
+    conn = sqlite3.connect(path)
+    try:
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        conn.close()
+    assert {"reviews", "meta"} <= tables
