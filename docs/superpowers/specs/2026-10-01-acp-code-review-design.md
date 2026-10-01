@@ -552,8 +552,13 @@ deliberately built to be safe to run at any moment, because that is what makes i
 * It runs in ``create``, the one point every worktree passes through, not in the daemon worker.
   A reap in the worker alone would miss ``review --inline``, which never involves the daemon and
   is a path people take by hand often enough to leak on.
-* It only considers names carrying this tool's prefix, so a worktree the user made by hand is
-  never a candidate.
+* It requires a **marker file** inside the worktree before it will remove anything, and that
+  marker is what proves ownership. The prefix alone is not enough, and this was found by
+  constructing the collision rather than by reasoning about it: a user who names a worktree
+  ``code-review-<digits>-something`` produces a path indistinguishable from ours, and if those
+  digits happened to be a dead pid the reap would have deleted their worktree. A marker cannot
+  be produced by accident. An agent that deletes the marker costs a reap rather than somebody's
+  work, which is the right way round for a step whose failure mode is deletion.
 * It only removes worktrees whose owning process is **gone**. This is the part that is easy to
   get wrong. An inline review and the daemon can run at the same time against one repository, and
   a reap that ignored liveness would delete the worktree a review was actively using, turning a
@@ -570,6 +575,20 @@ by the fix. The cross-worktree case, previously the worst of the three, was chec
 way: the reviewed commit's ``average()`` had no empty-input guard, the worktree the review ran
 from had a hardened one, and the agent found the ``ZeroDivisionError`` and quoted the unguarded
 commit's docstring. Under the old behaviour it would have seen the guard and reported nothing.
+
+**Measured cost.** Creating and removing the worktree costs 53ms on this repository and about
+470ms on a synthetic 3000-file one, since it is a full checkout. That is small next to an agent
+review, which runs for seconds to minutes, and it buys a correct read of the reviewed commit
+plus an index the agent cannot reach. The main practical cost is disk: the checkout is
+proportional to the working tree, so a very large monorepo pays that per review. Reviews land in
+the system temp directory, so ``TMPDIR`` is the knob for a machine that is short of space.
+
+A secondary consequence worth stating: the agent no longer sees untracked, ignored or
+uncommitted files, and cannot see a branch name, because it is at a detached checkout of the
+reviewed commit. For a commit review that is a reduction in false positives rather than a loss,
+and it was checked against a real agent rather than assumed: four reviews on a repository with
+untracked files and a populated ``.gitignore`` produced correct relative citations, no phantom
+"missing file" findings, and no mention of the temporary path anywhere in the stored output.
 
 This is confinement of accidents, not a sandbox. The worktree shares the object's store and
 config, and a determined agent can still reach outside it. That was never the policy's job:

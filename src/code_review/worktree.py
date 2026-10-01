@@ -59,6 +59,17 @@ PREFIX = "code-review-"
 #: ``<prefix><pid>-<random>``, so a leftover can be attributed to the process that made it.
 _OWNER = re.compile(rf"^{re.escape(PREFIX)}(?P<pid>\d+)-")
 
+#: Written into every worktree this module creates, and required before one may be removed.
+#:
+#: Ownership cannot safely be inferred from the directory name alone. The prefix is guessable,
+#: so a user who names a worktree ``code-review-<digits>-something`` would produce a path that
+#: looks exactly like ours, and if that number happened to be a dead pid the reap would delete
+#: their worktree. A marker file cannot be produced by accident.
+#:
+#: An agent that deletes the marker costs us a reap, not a user's worktree, which is the right
+#: way round for something whose failure mode is deleting work.
+MARKER = ".code-review-worktree"
+
 DEFAULT_TIMEOUT = 120
 
 log = logging.getLogger(__name__)
@@ -108,7 +119,8 @@ def create(repo: Path, sha: str) -> Path:
     path = _path_for_new_worktree()
     try:
         _run(repo, ["worktree", "add", "--detach", "--quiet", str(path), sha])
-    except WorktreeError:
+        (path / MARKER).write_text(f"{os.getpid()}\n", encoding="utf-8")
+    except WorktreeError, OSError:
         # git may have registered a partial worktree before failing; do not leave it behind.
         _discard(repo, path)
         raise
@@ -175,7 +187,7 @@ def reap_stale(repo: Path) -> list[Path]:
         if prefix != "worktree" or not value:
             continue
         path = Path(value)
-        if not is_ours(path) or not owner_is_gone(path):
+        if not _is_marked(path) or not owner_is_gone(path):
             continue
         _discard(repo, path)
         removed.append(path)
@@ -183,8 +195,20 @@ def reap_stale(repo: Path) -> list[Path]:
 
 
 def is_ours(path: Path) -> bool:
-    """Whether *path* looks like a worktree this module created."""
+    """Whether *path* looks like a worktree this module created.
+
+    A name test, kept because it is useful and cheap, but deliberately not sufficient: see
+    :data:`MARKER` for why the reap requires the marker as well.
+    """
     return path.name.startswith(PREFIX)
+
+
+def _is_marked(path: Path) -> bool:
+    """Whether *path* carries this module's marker, which is what proves we made it."""
+    try:
+        return (path / MARKER).is_file()
+    except OSError:
+        return False
 
 
 def owner_is_gone(path: Path) -> bool:
