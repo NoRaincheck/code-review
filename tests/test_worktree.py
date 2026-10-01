@@ -519,3 +519,127 @@ def test_a_reap_during_a_live_review_leaves_that_review_alone(
         assert thread.is_alive(), f"review ended early, so the window proved nothing: {outcome!r}"
     finally:
         thread.join(timeout=60)
+
+
+# -- failure paths, which are the ones that matter in a module about surviving failure ----
+
+
+def test_a_failed_worktree_add_leaves_nothing_registered(repo: Path, tmp_path: Path) -> None:
+    """git can fail after creating some of what it needs, so the failure path has to clean up.
+
+    Otherwise a review that cannot start leaves a registration behind, which is precisely the
+    leak the reap exists to clear, created by the code that was supposed to avoid it.
+    """
+    before = _run_git(repo, "worktree", "list", "--porcelain")
+
+    with pytest.raises(worktree.WorktreeError):
+        worktree.create(repo, "0" * 40)  # not a commit
+
+    assert _run_git(repo, "worktree", "list", "--porcelain") == before
+    assert not (git.common_dir(repo) / "worktrees").exists()
+
+
+def test_the_error_names_the_git_failure_not_just_the_exit_code(repo: Path) -> None:
+    """A bare exit code is useless at three in the morning; the reason has to survive."""
+    with pytest.raises(worktree.WorktreeError) as raised:
+        worktree.create(repo, "0" * 40)
+    message = str(raised.value)
+    assert "worktree add" in message
+    assert "0" * 40 in message, f"the rejected ref should appear in the message: {message}"
+
+
+def test_a_reap_failure_does_not_stop_the_review_from_starting(
+    repo: Path, second_commit: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Housekeeping is not worth blocking a review for."""
+    from code_review import worktree as wt
+
+    real_run = wt._run
+
+    def list_only(_repo: Path, args: list[str], **kwargs: object) -> str:
+        # Break only the reap's `worktree list`. Failing every call would also break the add,
+        # which would test nothing except that subprocess errors propagate.
+        if args[:2] == ["worktree", "list"]:
+            raise wt.WorktreeError("git worktree list failed")
+        return real_run(_repo, args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(wt, "_run", list_only)
+    # Must not raise, and must still produce a usable worktree.
+    path = wt.create(repo, second_commit)
+    try:
+        assert (path / "app.py").is_file()
+    finally:
+        wt.remove(repo, path)
+
+
+def test_a_permission_error_reading_the_owner_keeps_the_worktree(
+    repo: Path, second_commit: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not being allowed to signal a pid is not evidence that it is dead.
+
+    On a machine where another user's process owns the pid, raising EPERM means the process
+    exists and belongs to someone else. Treating that as dead would remove a worktree that is
+    still in use, so it has to read as alive.
+    """
+    path = Path(tempfile.mkdtemp()) / f"{worktree.PREFIX}31337-notmine"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", "--quiet", str(path), second_commit],
+        cwd=repo,
+        check=True,
+    )
+
+    def denied(pid: int, signal: int) -> None:
+        raise PermissionError(f"pid {pid}")
+
+    monkeypatch.setattr(worktree.os, "kill", denied)
+    try:
+        assert worktree.owner_is_gone(path) is False
+        assert worktree.reap_stale(repo) == [], "reaped a worktree it could not prove was dead"
+    finally:
+        monkeypatch.undo()
+        worktree.remove(repo, path)
+
+
+def test_our_own_worktree_is_never_considered_abandoned(repo: Path, second_commit: str) -> None:
+    """The current process is trivially alive; this is the guard that says so explicitly."""
+    path = worktree.create(repo, second_commit)
+    try:
+        assert worktree.is_ours(path)
+        assert worktree.owner_is_gone(path) is False
+    finally:
+        worktree.remove(repo, path)
+
+
+def test_creating_a_worktree_reaps_a_leftover(repo: Path, second_commit: str) -> None:
+    """The reap-through-create path, in process.
+
+    The end-to-end version of this runs the review as a subprocess, so its coverage is not
+    collected and the branch that logs the removal goes unmeasured. This asserts the same
+    invariant directly, which is also far faster.
+    """
+    leaked = _leaked(repo, second_commit)
+    assert leaked.is_dir()
+
+    path = worktree.create(repo, second_commit)
+    try:
+        assert not leaked.exists(), "creating a worktree did not clear the previous leftover"
+        assert (path / "app.py").is_file(), "and it did not create the new one"
+    finally:
+        worktree.remove(repo, path)
+
+
+def test_a_path_with_no_pid_in_its_name_is_not_considered_abandoned(
+    repo: Path, second_commit: str
+) -> None:
+    """Not being one of ours means the question does not arise, so it answers False.
+
+    Guarding on the pid rather than the prefix alone is what makes the liveness check safe, and
+    this is the branch that keeps a name we cannot attribute from being treated as a leak.
+    """
+    mine = repo.parent / "plain-worktree"
+    _run_git(repo, "worktree", "add", "-q", str(mine), "-b", "plain")
+    try:
+        assert worktree.is_ours(mine) is False
+        assert worktree.owner_is_gone(mine) is False
+    finally:
+        _run_git(repo, "worktree", "remove", "--force", str(mine))
